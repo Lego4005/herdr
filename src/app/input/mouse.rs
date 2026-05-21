@@ -29,6 +29,12 @@ impl AppState {
         if self.mode != Mode::Terminal {
             return;
         }
+        if let Some((pane_id, widget_rect, _)) =
+            self.custom_mode_click_target(mouse.column, mouse.row)
+        {
+            self.handle_custom_mode_mouse(pane_id, widget_rect, mouse);
+            return;
+        }
         let Some(info) = self.pane_at(mouse.column, mouse.row).cloned() else {
             return;
         };
@@ -364,6 +370,11 @@ impl AppState {
                         self.mode = Mode::Terminal;
                         return None;
                     }
+                } else if let Some((pane_id, widget_rect, _)) =
+                    self.custom_mode_click_target(mouse.column, mouse.row)
+                {
+                    self.handle_custom_mode_mouse(pane_id, widget_rect, mouse);
+                    return None;
                 } else if let Some(info) = self.pane_at(mouse.column, mouse.row).cloned() {
                     self.focus_pane(info.id);
                     if self.mode != Mode::Terminal {
@@ -627,7 +638,13 @@ impl AppState {
             MouseEventKind::ScrollUp | MouseEventKind::ScrollDown if !in_sidebar => {
                 self.selection = None;
                 self.selection_autoscroll = None;
-                self.handle_terminal_wheel(mouse);
+                if let Some((pane_id, widget_rect, _)) =
+                    self.custom_mode_click_target(mouse.column, mouse.row)
+                {
+                    self.handle_custom_mode_mouse(pane_id, widget_rect, mouse);
+                } else {
+                    self.handle_terminal_wheel(mouse);
+                }
             }
 
             MouseEventKind::ScrollUp if in_sidebar => {
@@ -1021,6 +1038,173 @@ impl AppState {
 
     pub(crate) fn pane_info_by_id(&self, pane_id: crate::layout::PaneId) -> Option<&PaneInfo> {
         self.view.pane_infos.iter().find(|info| info.id == pane_id)
+    }
+
+    pub(super) fn custom_mode_click_target(
+        &self,
+        col: u16,
+        row: u16,
+    ) -> Option<(crate::layout::PaneId, Rect, bool)> {
+        let ws_idx = self.active?;
+        let ws = self.workspaces.get(ws_idx)?;
+        for info in &self.view.pane_infos {
+            if let Some(pane_state) = ws.pane_state(info.id) {
+                let is_custom = matches!(
+                    pane_state.mode,
+                    crate::pane::state::PaneMode::FileExplorer { .. }
+                        | crate::pane::state::PaneMode::MarkdownViewer { .. }
+                );
+                if is_custom {
+                    let pane_inner_w = if ws.layout.pane_count() > 1 {
+                        info.rect.width.saturating_sub(2)
+                    } else {
+                        info.rect.width
+                    };
+                    let has_drawer = pane_inner_w >= 80;
+                    if has_drawer && info.is_in_drawer(col, row, true) {
+                        let drawer_rect = Rect::new(
+                            info.inner_rect.x + info.inner_rect.width + 1,
+                            info.inner_rect.y,
+                            40,
+                            info.inner_rect.height,
+                        );
+                        return Some((info.id, drawer_rect, true));
+                    } else if !has_drawer
+                        && col >= info.inner_rect.x
+                        && col < info.inner_rect.x + info.inner_rect.width
+                        && row >= info.inner_rect.y
+                        && row < info.inner_rect.y + info.inner_rect.height
+                    {
+                        return Some((info.id, info.inner_rect, false));
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    pub(super) fn handle_custom_mode_mouse(
+        &mut self,
+        pane_id: crate::layout::PaneId,
+        widget_rect: Rect,
+        mouse: MouseEvent,
+    ) {
+        self.focus_pane(pane_id);
+        if self.mode != Mode::Terminal {
+            self.mode = Mode::Terminal;
+        }
+
+        let Some(ws_idx) = self.active else {
+            return;
+        };
+        let Some(ws) = self.workspaces.get_mut(ws_idx) else {
+            return;
+        };
+        let Some(pane) = ws.pane_state_mut(pane_id) else {
+            return;
+        };
+
+        match &mut pane.mode {
+            crate::pane::state::PaneMode::FileExplorer {
+                cwd,
+                selected_index,
+                files,
+                scroll,
+                search_query,
+                search_mode: _,
+                is_tree_view,
+                expanded_dirs,
+                filter_md,
+                sort_by_mtime,
+            } => {
+                let visible_height = (widget_rect.height as usize).saturating_sub(5).max(1);
+
+                match mouse.kind {
+                    MouseEventKind::ScrollUp => {
+                        if !files.is_empty() {
+                            *selected_index = selected_index.saturating_sub(1);
+                            if *selected_index < *scroll {
+                                *scroll = *selected_index;
+                            }
+                        }
+                    }
+                    MouseEventKind::ScrollDown => {
+                        if !files.is_empty() {
+                            *selected_index = (*selected_index + 1).min(files.len() - 1);
+                            if *selected_index >= *scroll + visible_height {
+                                *scroll = *selected_index + 1 - visible_height;
+                            }
+                        }
+                    }
+                    MouseEventKind::Down(MouseButton::Left) => {
+                        let list_start_y = widget_rect.y + 3;
+                        if mouse.row >= list_start_y
+                            && mouse.row < list_start_y + widget_rect.height.saturating_sub(5)
+                        {
+                            let click_offset = (mouse.row - list_start_y) as usize;
+                            let clicked_idx = *scroll + click_offset;
+                            if clicked_idx < files.len() {
+                                if *selected_index == clicked_idx {
+                                    if let Some(entry) = files.get(clicked_idx) {
+                                        if entry.is_dir {
+                                            let path = entry.path.clone();
+                                            if expanded_dirs.contains(&path) {
+                                                expanded_dirs.remove(&path);
+                                            } else {
+                                                expanded_dirs.insert(path);
+                                            }
+                                            let favorites = crate::config::load_favorites(cwd);
+                                            *files = crate::app::state::build_explorer_entries(
+                                                cwd,
+                                                *is_tree_view,
+                                                expanded_dirs,
+                                                search_query,
+                                                *filter_md,
+                                                *sort_by_mtime,
+                                                &favorites,
+                                            );
+                                        } else {
+                                            let path = entry.path.clone();
+                                            if let Ok(content) = std::fs::read_to_string(&path) {
+                                                let lines =
+                                                    content.lines().map(String::from).collect();
+                                                pane.mode =
+                                                    crate::pane::state::PaneMode::MarkdownViewer {
+                                                        path,
+                                                        content,
+                                                        scroll: 0,
+                                                        lines,
+                                                    };
+                                            }
+                                        }
+                                    }
+                                } else {
+                                    *selected_index = clicked_idx;
+                                }
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            crate::pane::state::PaneMode::MarkdownViewer {
+                path: _,
+                content: _,
+                scroll,
+                lines,
+            } => match mouse.kind {
+                MouseEventKind::ScrollUp => {
+                    *scroll = scroll.saturating_sub(3);
+                }
+                MouseEventKind::ScrollDown => {
+                    if *scroll < lines.len().saturating_sub(1) {
+                        *scroll = (*scroll + 3).min(lines.len().saturating_sub(1));
+                    }
+                }
+                _ => {}
+            },
+            _ => {}
+        }
     }
 
     pub(super) fn pane_frame_at(&self, col: u16, row: u16) -> Option<&PaneInfo> {

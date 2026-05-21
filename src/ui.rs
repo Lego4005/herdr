@@ -6,6 +6,7 @@ use ratatui::{
 };
 
 mod dialogs;
+mod explorer_widgets;
 mod keybind_help;
 mod menus;
 mod mobile;

@@ -30,6 +30,7 @@ pub(crate) struct SelectionAutoscroll {
     pub last_mouse_screen_row: u16,
     pub inner_rect: Rect,
 }
+use crate::pane::state::{FileEntry, PaneMode};
 use crate::terminal_theme::TerminalTheme;
 use crate::workspace::Workspace;
 
@@ -1089,6 +1090,23 @@ impl AppState {
         self.runtime_for_pane_in_workspace(ws_idx, pane_id)
     }
 
+    // Helper method for retrieving the focused pane state, kept for future integration
+    #[allow(dead_code)]
+    pub(crate) fn focused_pane_state(&self) -> Option<&crate::pane::state::PaneState> {
+        let ws_idx = self.active?;
+        let ws = self.workspaces.get(ws_idx)?;
+        let pane_id = ws.focused_pane_id()?;
+        ws.pane_state(pane_id)
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn focused_pane_state_mut(&mut self) -> Option<&mut crate::pane::state::PaneState> {
+        let ws_idx = self.active?;
+        let ws = self.workspaces.get_mut(ws_idx)?;
+        let pane_id = ws.focused_pane_id()?;
+        ws.pane_state_mut(pane_id)
+    }
+
     pub fn is_active_pane(
         &self,
         ws_idx: usize,
@@ -1108,6 +1126,323 @@ impl AppState {
             return false;
         }
         ws.active_tab().map(|tab| tab.layout.focused()) == Some(pane_id)
+    }
+
+    pub(crate) fn toggle_explorer_on_focused_pane(&mut self) {
+        let ws_idx = match self.active {
+            Some(idx) => idx,
+            None => return,
+        };
+        let ws = match self.workspaces.get_mut(ws_idx) {
+            Some(ws) => ws,
+            None => return,
+        };
+        let cwd = ws.identity_cwd.clone();
+        let pane_id = match ws.focused_pane_id() {
+            Some(pid) => pid,
+            None => return,
+        };
+        let pane = match ws.pane_state_mut(pane_id) {
+            Some(p) => p,
+            None => return,
+        };
+
+        match &pane.mode {
+            PaneMode::Terminal => {
+                let favorites = crate::config::load_favorites(&cwd);
+                let is_tree_view = true;
+                let mut expanded_dirs = std::collections::HashSet::new();
+                expanded_dirs.insert(cwd.clone());
+                let filter_md = false;
+                let sort_by_mtime = false;
+
+                let files = build_explorer_entries(
+                    &cwd,
+                    is_tree_view,
+                    &expanded_dirs,
+                    "",
+                    filter_md,
+                    sort_by_mtime,
+                    &favorites,
+                );
+
+                pane.mode = PaneMode::FileExplorer {
+                    cwd,
+                    selected_index: 0,
+                    files,
+                    scroll: 0,
+                    search_query: String::new(),
+                    search_mode: false,
+                    is_tree_view,
+                    expanded_dirs,
+                    filter_md,
+                    sort_by_mtime,
+                };
+            }
+            PaneMode::FileExplorer { .. } | PaneMode::MarkdownViewer { .. } => {
+                pane.mode = PaneMode::Terminal;
+            }
+        }
+    }
+}
+
+pub(crate) fn build_explorer_entries(
+    workspace_root: &std::path::Path,
+    is_tree_view: bool,
+    expanded_dirs: &std::collections::HashSet<std::path::PathBuf>,
+    search_query: &str,
+    filter_md: bool,
+    sort_by_mtime: bool,
+    favorites: &std::collections::HashSet<std::path::PathBuf>,
+) -> Vec<FileEntry> {
+    let mut out = Vec::new();
+    if is_tree_view {
+        traverse_tree(
+            workspace_root,
+            0,
+            expanded_dirs,
+            search_query,
+            filter_md,
+            favorites,
+            &mut out,
+        );
+    } else {
+        gather_flat_files(workspace_root, filter_md, search_query, favorites, &mut out);
+        out.sort_by(|a, b| {
+            let a_fav = favorites.contains(&a.path);
+            let b_fav = favorites.contains(&b.path);
+            match (a_fav, b_fav) {
+                (true, false) => std::cmp::Ordering::Less,
+                (false, true) => std::cmp::Ordering::Greater,
+                _ => {
+                    if sort_by_mtime {
+                        let time_a = std::fs::metadata(&a.path)
+                            .and_then(|m| m.modified())
+                            .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+                        let time_b = std::fs::metadata(&b.path)
+                            .and_then(|m| m.modified())
+                            .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+                        time_b.cmp(&time_a) // newest first
+                    } else {
+                        a.name.to_lowercase().cmp(&b.name.to_lowercase())
+                    }
+                }
+            }
+        });
+    }
+    out
+}
+
+fn dir_has_matches(dir: &std::path::Path, search_query: &str, filter_md: bool) -> bool {
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(current) = stack.pop() {
+        if let Ok(rd) = std::fs::read_dir(current) {
+            for entry in rd.flatten() {
+                let path = entry.path();
+                let is_dir = path.is_dir();
+                let name = path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                if name.is_empty() {
+                    continue;
+                }
+                if is_dir {
+                    if name == ".git"
+                        || name == "node_modules"
+                        || name == "target"
+                        || name == "vendor"
+                        || name == ".github"
+                        || name == ".pi"
+                    {
+                        continue;
+                    }
+                    stack.push(path);
+                } else {
+                    if filter_md && !name.ends_with(".md") {
+                        continue;
+                    }
+                    if search_query.is_empty()
+                        || name.to_lowercase().contains(&search_query.to_lowercase())
+                    {
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+    false
+}
+
+fn dir_has_md_files(dir: &std::path::Path) -> bool {
+    dir_has_matches(dir, "", true)
+}
+
+fn traverse_tree(
+    dir: &std::path::Path,
+    depth: usize,
+    expanded_dirs: &std::collections::HashSet<std::path::PathBuf>,
+    search_query: &str,
+    filter_md: bool,
+    favorites: &std::collections::HashSet<std::path::PathBuf>,
+    out: &mut Vec<FileEntry>,
+) {
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return;
+    };
+    let mut entries = Vec::new();
+    for entry in rd.flatten() {
+        let path = entry.path();
+        let is_dir = path.is_dir();
+        let name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        if name.is_empty() {
+            continue;
+        }
+
+        // Ignore common directories
+        if is_dir
+            && (name == ".git"
+                || name == "node_modules"
+                || name == "target"
+                || name == "vendor"
+                || name == ".github"
+                || name == ".pi")
+        {
+            continue;
+        }
+
+        entries.push((path, is_dir, name));
+    }
+
+    // Sort entries: directories first, then files, sorted alphabetically.
+    // Group favorites to the top of the current directory level.
+    entries.sort_by(|a, b| {
+        let a_fav = favorites.contains(&a.0);
+        let b_fav = favorites.contains(&b.0);
+        match (a_fav, b_fav) {
+            (true, false) => std::cmp::Ordering::Less,
+            (false, true) => std::cmp::Ordering::Greater,
+            _ => match (a.1, b.1) {
+                (true, false) => std::cmp::Ordering::Less,
+                (false, true) => std::cmp::Ordering::Greater,
+                _ => a.2.to_lowercase().cmp(&b.2.to_lowercase()),
+            },
+        }
+    });
+
+    for (path, is_dir, name) in entries {
+        let is_fav = favorites.contains(&path);
+        if is_dir {
+            // Check matches/filters
+            if !search_query.is_empty() {
+                if !dir_has_matches(&path, search_query, filter_md) {
+                    continue;
+                }
+            } else if filter_md && !dir_has_md_files(&path) {
+                continue;
+            }
+
+            let is_expanded = !search_query.is_empty() || expanded_dirs.contains(&path);
+
+            out.push(FileEntry {
+                path: path.clone(),
+                is_dir: true,
+                name,
+                depth,
+                is_expanded,
+                is_favorite: is_fav,
+            });
+
+            if is_expanded {
+                traverse_tree(
+                    &path,
+                    depth + 1,
+                    expanded_dirs,
+                    search_query,
+                    filter_md,
+                    favorites,
+                    out,
+                );
+            }
+        } else {
+            // It's a file
+            if filter_md && !name.ends_with(".md") {
+                continue;
+            }
+            if !search_query.is_empty()
+                && !name.to_lowercase().contains(&search_query.to_lowercase())
+            {
+                continue;
+            }
+
+            out.push(FileEntry {
+                path,
+                is_dir: false,
+                name,
+                depth,
+                is_expanded: false,
+                is_favorite: is_fav,
+            });
+        }
+    }
+}
+
+fn gather_flat_files(
+    dir: &std::path::Path,
+    filter_md: bool,
+    search_query: &str,
+    favorites: &std::collections::HashSet<std::path::PathBuf>,
+    out: &mut Vec<FileEntry>,
+) {
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(current) = stack.pop() {
+        let Ok(rd) = std::fs::read_dir(current) else {
+            continue;
+        };
+        for entry in rd.flatten() {
+            let path = entry.path();
+            let is_dir = path.is_dir();
+            let name = path
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            if name.is_empty() {
+                continue;
+            }
+            if is_dir {
+                if name == ".git"
+                    || name == "node_modules"
+                    || name == "target"
+                    || name == "vendor"
+                    || name == ".github"
+                    || name == ".pi"
+                {
+                    continue;
+                }
+                stack.push(path);
+            } else {
+                if filter_md && !name.ends_with(".md") {
+                    continue;
+                }
+                if !search_query.is_empty()
+                    && !name.to_lowercase().contains(&search_query.to_lowercase())
+                {
+                    continue;
+                }
+                let is_fav = favorites.contains(&path);
+                out.push(FileEntry {
+                    path,
+                    is_dir: false,
+                    name,
+                    depth: 0,
+                    is_expanded: false,
+                    is_favorite: is_fav,
+                });
+            }
+        }
     }
 }
 
@@ -1268,6 +1603,24 @@ impl AppState {
     }
 }
 
+pub fn calculate_scroll(
+    selected_index: usize,
+    scroll: usize,
+    visible_height: usize,
+    total_items: usize,
+) -> usize {
+    if total_items <= visible_height {
+        return 0;
+    }
+    if selected_index < scroll {
+        selected_index
+    } else if selected_index >= scroll + visible_height {
+        selected_index + 1 - visible_height
+    } else {
+        scroll
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1318,5 +1671,20 @@ mod tests {
             KeyCode::Char('b'),
             KeyModifiers::SHIFT,
         ));
+    }
+
+    #[test]
+    fn test_calculate_scroll_up() {
+        assert_eq!(calculate_scroll(2, 5, 10, 100), 2);
+    }
+
+    #[test]
+    fn test_calculate_scroll_down() {
+        assert_eq!(calculate_scroll(15, 5, 10, 100), 6);
+    }
+
+    #[test]
+    fn test_calculate_scroll_center() {
+        assert_eq!(calculate_scroll(8, 5, 10, 100), 5);
     }
 }

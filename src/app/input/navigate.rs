@@ -483,6 +483,7 @@ pub(crate) enum NavigateAction {
     ReloadConfig,
     OpenNotificationTarget,
     Detach,
+    ToggleExplorer,
 }
 
 fn indexed_navigation_action(
@@ -579,6 +580,7 @@ fn action_for_key(
             NavigateAction::OpenNotificationTarget,
         ),
         (&kb.detach, NavigateAction::Detach),
+        (&kb.toggle_explorer, NavigateAction::ToggleExplorer),
     ] {
         if action_matches(bindings, key, dispatch) {
             return Some(action);
@@ -743,6 +745,10 @@ pub(super) fn execute_navigate_action_in_context(
         }
         NavigateAction::Detach => {
             state.detach_requested = true;
+            leave_navigate_mode(state);
+        }
+        NavigateAction::ToggleExplorer => {
+            state.toggle_explorer_on_focused_pane();
             leave_navigate_mode(state);
         }
     }

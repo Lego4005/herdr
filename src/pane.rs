@@ -17,7 +17,7 @@ use crate::layout::PaneId;
 
 mod input;
 mod osc;
-mod state;
+pub(crate) mod state;
 mod terminal;
 
 use self::terminal::{GhosttyPaneTerminal, PaneTerminal};

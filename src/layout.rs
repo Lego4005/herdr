@@ -38,6 +38,21 @@ pub struct PaneInfo {
     pub is_focused: bool,
 }
 
+impl PaneInfo {
+    pub fn is_in_drawer(&self, col: u16, row: u16, has_drawer: bool) -> bool {
+        if has_drawer {
+            let drawer_x = self.inner_rect.x + self.inner_rect.width + 1;
+            let drawer_width = 40;
+            col >= drawer_x
+                && col < drawer_x + drawer_width
+                && row >= self.inner_rect.y
+                && row < self.inner_rect.y + self.inner_rect.height
+        } else {
+            false
+        }
+    }
+}
+
 /// Info about a split boundary, used for mouse drag resize.
 #[derive(Clone)]
 pub struct SplitBorder {

@@ -6,11 +6,13 @@ use ratatui::{
     Frame,
 };
 
+use super::explorer_widgets::{render_explorer, render_viewer};
 use super::scrollbar::{render_pane_scrollbar, should_show_scrollbar};
 use super::widgets::panel_contrast_fg;
 use crate::app::state::Palette;
 use crate::app::{AppState, Mode};
 use crate::layout::PaneInfo;
+use crate::pane::state::PaneMode;
 use crate::terminal::TerminalRuntime;
 
 pub(crate) fn pane_is_scrolled_back(rt: &TerminalRuntime) -> bool {
@@ -109,7 +111,16 @@ pub(super) fn resize_tab_panes(
     if tab.zoomed {
         let focused_id = tab.layout.focused();
         if let Some((terminal_id, rt)) = runtime_for_tab_pane(app, tab, focused_id) {
-            let pane_inner = pane_inner_rect(area, multi_pane);
+            let mut pane_inner = pane_inner_rect(area, multi_pane);
+            if let Some(pane_state) = tab.panes.get(&focused_id) {
+                if matches!(
+                    pane_state.mode,
+                    PaneMode::FileExplorer { .. } | PaneMode::MarkdownViewer { .. }
+                ) && pane_inner.width >= 80
+                {
+                    pane_inner.width = pane_inner.width.saturating_sub(40);
+                }
+            }
             let inner_rect = stable_terminal_inner_rect(pane_inner);
             if !app.direct_attach_resize_locks.contains(terminal_id) {
                 rt.resize(
@@ -124,11 +135,21 @@ pub(super) fn resize_tab_panes(
     }
 
     for info in tab.layout.panes(area) {
-        let pane_inner = if multi_pane {
+        let mut pane_inner = if multi_pane {
             Block::default().borders(Borders::ALL).inner(info.rect)
         } else {
             area
         };
+
+        if let Some(pane_state) = tab.panes.get(&info.id) {
+            if matches!(
+                pane_state.mode,
+                PaneMode::FileExplorer { .. } | PaneMode::MarkdownViewer { .. }
+            ) && pane_inner.width >= 80
+            {
+                pane_inner.width = pane_inner.width.saturating_sub(40);
+            }
+        }
 
         if let Some((terminal_id, rt)) = runtime_for_tab_pane(app, tab, info.id) {
             let inner_rect = stable_terminal_inner_rect(pane_inner);
@@ -163,7 +184,16 @@ pub(super) fn compute_pane_infos(
 
     if ws.zoomed {
         let focused_id = ws.layout.focused();
-        let pane_inner = pane_inner_rect(area, multi_pane);
+        let mut pane_inner = pane_inner_rect(area, multi_pane);
+        if let Some(pane_state) = ws.pane_state(focused_id) {
+            if matches!(
+                pane_state.mode,
+                PaneMode::FileExplorer { .. } | PaneMode::MarkdownViewer { .. }
+            ) && pane_inner.width >= 80
+            {
+                pane_inner.width = pane_inner.width.saturating_sub(40);
+            }
+        }
         let mut inner_rect = pane_inner;
         let mut scrollbar_rect = None;
         if let Some(rt) = app.runtime_for_pane_in_workspace(ws_idx, focused_id) {
@@ -193,7 +223,7 @@ pub(super) fn compute_pane_infos(
     let mut pane_infos = ws.layout.panes(area);
 
     for info in &mut pane_infos {
-        let pane_inner = if multi_pane {
+        let mut pane_inner = if multi_pane {
             let border_set = if info.is_focused && terminal_active {
                 ratatui::symbols::border::THICK
             } else {
@@ -206,6 +236,16 @@ pub(super) fn compute_pane_infos(
         } else {
             area
         };
+
+        if let Some(pane_state) = ws.pane_state(info.id) {
+            if matches!(
+                pane_state.mode,
+                PaneMode::FileExplorer { .. } | PaneMode::MarkdownViewer { .. }
+            ) && pane_inner.width >= 80
+            {
+                pane_inner.width = pane_inner.width.saturating_sub(40);
+            }
+        }
 
         let mut inner_rect = pane_inner;
         let mut scrollbar_rect = None;
@@ -282,9 +322,111 @@ pub(super) fn render_panes(app: &AppState, frame: &mut Frame, area: Rect) {
                 frame.render_widget(block, info.rect);
             }
 
-            let show_cursor = info.is_focused && terminal_active && !pane_is_scrolled_back(rt);
-            rt.render(frame, info.inner_rect, show_cursor);
-            render_pane_scrollbar(app, frame, info, rt);
+            let show_custom_mode = ws.pane_state(info.id).map(|p| &p.mode);
+            match show_custom_mode {
+                Some(PaneMode::FileExplorer {
+                    cwd,
+                    selected_index,
+                    files,
+                    scroll,
+                    search_query,
+                    search_mode,
+                    is_tree_view,
+                    expanded_dirs: _,
+                    filter_md,
+                    sort_by_mtime,
+                }) => {
+                    let pane_inner_w = if multi_pane {
+                        info.rect.width.saturating_sub(2)
+                    } else {
+                        area.width
+                    };
+
+                    if pane_inner_w >= 80 {
+                        // Render terminal on the left
+                        let show_cursor =
+                            info.is_focused && terminal_active && !pane_is_scrolled_back(rt);
+                        rt.render(frame, info.inner_rect, show_cursor);
+                        render_pane_scrollbar(app, frame, info, rt);
+
+                        // Render explorer drawer on the right
+                        let drawer_rect = Rect::new(
+                            info.inner_rect.x + info.inner_rect.width + 1,
+                            info.inner_rect.y,
+                            40,
+                            info.inner_rect.height,
+                        );
+                        render_explorer(
+                            app,
+                            frame,
+                            drawer_rect,
+                            cwd,
+                            files,
+                            *selected_index,
+                            *scroll,
+                            search_query,
+                            *search_mode,
+                            *is_tree_view,
+                            *filter_md,
+                            *sort_by_mtime,
+                        );
+                    } else {
+                        // Render full explorer
+                        render_explorer(
+                            app,
+                            frame,
+                            info.inner_rect,
+                            cwd,
+                            files,
+                            *selected_index,
+                            *scroll,
+                            search_query,
+                            *search_mode,
+                            *is_tree_view,
+                            *filter_md,
+                            *sort_by_mtime,
+                        );
+                    }
+                }
+                Some(PaneMode::MarkdownViewer {
+                    path,
+                    content: _,
+                    scroll,
+                    lines,
+                }) => {
+                    let pane_inner_w = if multi_pane {
+                        info.rect.width.saturating_sub(2)
+                    } else {
+                        area.width
+                    };
+
+                    if pane_inner_w >= 80 {
+                        // Render terminal on the left
+                        let show_cursor =
+                            info.is_focused && terminal_active && !pane_is_scrolled_back(rt);
+                        rt.render(frame, info.inner_rect, show_cursor);
+                        render_pane_scrollbar(app, frame, info, rt);
+
+                        // Render markdown viewer drawer on the right
+                        let drawer_rect = Rect::new(
+                            info.inner_rect.x + info.inner_rect.width + 1,
+                            info.inner_rect.y,
+                            40,
+                            info.inner_rect.height,
+                        );
+                        render_viewer(app, frame, drawer_rect, path, lines, *scroll);
+                    } else {
+                        // Render full viewer
+                        render_viewer(app, frame, info.inner_rect, path, lines, *scroll);
+                    }
+                }
+                _ => {
+                    let show_cursor =
+                        info.is_focused && terminal_active && !pane_is_scrolled_back(rt);
+                    rt.render(frame, info.inner_rect, show_cursor);
+                    render_pane_scrollbar(app, frame, info, rt);
+                }
+            }
 
             let should_dim = !info.is_focused && multi_pane && !terminal_active;
             if should_dim {

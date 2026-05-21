@@ -279,6 +279,7 @@ pub struct Keybinds {
     pub zoom: ActionKeybinds,
     pub resize_mode: ActionKeybinds,
     pub toggle_sidebar: ActionKeybinds,
+    pub toggle_explorer: ActionKeybinds,
     pub custom_commands: Vec<CustomCommandKeybind>,
 }
 
@@ -415,6 +416,7 @@ impl Config {
             zoom: action!("keys.zoom", &self.keys.zoom),
             resize_mode: action!("keys.resize_mode", &self.keys.resize_mode),
             toggle_sidebar: action!("keys.toggle_sidebar", &self.keys.toggle_sidebar),
+            toggle_explorer: action!("keys.toggle_explorer", &self.keys.toggle_explorer),
             custom_commands: Vec::new(),
         };
 

@@ -25,8 +25,14 @@ fn unique_test_dir() -> PathBuf {
 }
 
 struct SpawnedHerdr {
-    _master: Box<dyn MasterPty + Send>,
+    _master: Option<Box<dyn MasterPty + Send>>,
     child: Box<dyn Child + Send + Sync>,
+}
+
+impl SpawnedHerdr {
+    fn close_master(&mut self) {
+        self._master = None;
+    }
 }
 
 struct SpawnedServerProcess {
@@ -45,6 +51,7 @@ impl Drop for SpawnedServerProcess {
 impl Drop for SpawnedHerdr {
     fn drop(&mut self) {
         let pid = self.child.process_id();
+        self.close_master();
         let _ = self.child.kill();
 
         if let Some(pid) = pid {
@@ -208,7 +215,7 @@ fn spawn_herdr_with_path(
     let child = pair.slave.spawn_command(cmd).unwrap();
     register_spawned_herdr_pid(child.process_id());
     SpawnedHerdr {
-        _master: pair.master,
+        _master: Some(pair.master),
         child,
     }
 }

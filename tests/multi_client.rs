@@ -30,13 +30,20 @@ fn unique_test_dir() -> PathBuf {
 }
 
 struct SpawnedHerdr {
-    _master: Box<dyn MasterPty + Send>,
+    _master: Option<Box<dyn MasterPty + Send>>,
     child: Box<dyn Child + Send + Sync>,
+}
+
+impl SpawnedHerdr {
+    fn close_master(&mut self) {
+        self._master = None;
+    }
 }
 
 impl Drop for SpawnedHerdr {
     fn drop(&mut self) {
         let pid = self.child.process_id();
+        self.close_master();
         let _ = self.child.kill();
 
         if let Some(pid) = pid {
@@ -134,7 +141,7 @@ fn spawn_server(config_home: &Path, runtime_dir: &Path, api_socket_path: &Path) 
     drop(pair.slave);
 
     SpawnedHerdr {
-        _master: pair.master,
+        _master: Some(pair.master),
         child,
     }
 }
@@ -169,7 +176,7 @@ fn spawn_client_process(
     drop(pair.slave);
 
     SpawnedHerdr {
-        _master: pair.master,
+        _master: Some(pair.master),
         child,
     }
 }

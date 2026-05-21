@@ -1,5 +1,6 @@
 use crossterm::event::{KeyCode, KeyModifiers};
 
+mod favorites;
 mod io;
 mod keybinds;
 mod model;
@@ -7,6 +8,7 @@ mod sound;
 mod theme;
 
 pub use self::{
+    favorites::{load_favorites, save_favorite},
     io::{
         config_diagnostic_summary, config_dir, config_path, load_live_config,
         remove_keybinding_config_sections, remove_section_key, state_dir, upsert_section_bool,

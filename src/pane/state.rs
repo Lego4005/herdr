@@ -1,5 +1,38 @@
 use crate::terminal::TerminalId;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileEntry {
+    pub path: std::path::PathBuf,
+    pub is_dir: bool,
+    pub name: String,
+    pub depth: usize,
+    pub is_expanded: bool,
+    pub is_favorite: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PaneMode {
+    Terminal,
+    FileExplorer {
+        cwd: std::path::PathBuf,
+        selected_index: usize,
+        files: Vec<FileEntry>,
+        scroll: usize,
+        search_query: String,
+        search_mode: bool,
+        is_tree_view: bool,
+        expanded_dirs: std::collections::HashSet<std::path::PathBuf>,
+        filter_md: bool,
+        sort_by_mtime: bool,
+    },
+    MarkdownViewer {
+        path: std::path::PathBuf,
+        content: String,
+        scroll: usize,
+        lines: Vec<String>,
+    },
+}
+
 /// Viewport state for a pane.
 ///
 /// Terminal identity, cwd, labels, and agent metadata live in TerminalState.
@@ -8,6 +41,7 @@ pub struct PaneState {
     /// Whether the user has seen this pane since its last state change to Idle.
     /// False = "Done" (agent finished while user was in another workspace).
     pub seen: bool,
+    pub mode: PaneMode,
 }
 
 impl PaneState {
@@ -15,6 +49,7 @@ impl PaneState {
         Self {
             attached_terminal_id,
             seen: true,
+            mode: PaneMode::Terminal,
         }
     }
 }

@@ -17,6 +17,7 @@ mod session;
 pub mod state;
 mod terminal_targets;
 mod theme_sync;
+pub(crate) mod web_launcher;
 
 use std::collections::{HashMap, HashSet};
 use std::future::pending;

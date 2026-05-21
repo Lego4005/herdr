@@ -30,13 +30,20 @@ fn unique_test_dir() -> PathBuf {
 }
 
 struct SpawnedHerdr {
-    _master: Box<dyn MasterPty + Send>,
+    _master: Option<Box<dyn MasterPty + Send>>,
     child: Box<dyn Child + Send + Sync>,
+}
+
+impl SpawnedHerdr {
+    fn close_master(&mut self) {
+        self._master = None;
+    }
 }
 
 impl Drop for SpawnedHerdr {
     fn drop(&mut self) {
         let pid = self.child.process_id();
+        self.close_master();
         let _ = self.child.kill();
 
         if let Some(pid) = pid {
@@ -124,7 +131,7 @@ fn spawn_server_with_path(
     drop(pair.slave);
 
     SpawnedHerdr {
-        _master: pair.master,
+        _master: Some(pair.master),
         child,
     }
 }
@@ -159,7 +166,7 @@ fn spawn_client_process(
     drop(pair.slave);
 
     SpawnedHerdr {
-        _master: pair.master,
+        _master: Some(pair.master),
         child,
     }
 }
@@ -1003,6 +1010,8 @@ fn cross_area_server_kill_then_restart_and_reconnect() {
     let mut thin_client = spawn_client_process(&config_home, &runtime_dir, &api_socket);
     let mut thin_reader = thin_client
         ._master
+        .as_ref()
+        .expect("has master")
         .try_clone_reader()
         .expect("clone thin client reader");
 
@@ -1039,6 +1048,7 @@ fn cross_area_server_kill_then_restart_and_reconnect() {
     unsafe {
         libc::kill(server_pid as libc::pid_t, libc::SIGKILL);
     }
+    server.close_master(); // Close master PTY to allow the child to exit on macOS
     assert!(
         wait_for_child_exit(&mut server.child, Duration::from_secs(5)),
         "server should exit after SIGKILL"

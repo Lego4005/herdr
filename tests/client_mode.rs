@@ -31,13 +31,20 @@ fn unique_test_dir() -> PathBuf {
 }
 
 struct SpawnedHerdr {
-    _master: Box<dyn MasterPty + Send>,
+    _master: Option<Box<dyn MasterPty + Send>>,
     child: Box<dyn Child + Send + Sync>,
+}
+
+impl SpawnedHerdr {
+    fn close_master(&mut self) {
+        self._master = None;
+    }
 }
 
 impl Drop for SpawnedHerdr {
     fn drop(&mut self) {
         let pid = self.child.process_id();
+        self.close_master();
         let _ = self.child.kill();
 
         if let Some(pid) = pid {
@@ -99,7 +106,7 @@ fn spawn_client_process(
     drop(pair.slave);
 
     SpawnedHerdr {
-        _master: pair.master,
+        _master: Some(pair.master),
         child,
     }
 }
@@ -142,7 +149,7 @@ fn spawn_server(
     drop(pair.slave);
 
     SpawnedHerdr {
-        _master: pair.master,
+        _master: Some(pair.master),
         child,
     }
 }
@@ -327,7 +334,7 @@ fn client_sees_headless_startup_config_diagnostic() {
     drop(pair.slave);
 
     let spawned = SpawnedHerdr {
-        _master: pair.master,
+        _master: Some(pair.master),
         child,
     };
     wait_for_socket(&api_socket, Duration::from_secs(10));
@@ -537,6 +544,7 @@ fn server_shutdown_sends_message_to_client() {
     );
 
     // Wait for the server to exit after shutdown signal.
+    spawned.close_master();
     let _ = spawned.child.wait();
 
     drop(spawned);
@@ -616,6 +624,8 @@ fn server_crash_after_attach_causes_lost_connection_error() {
     // Prove attached before kill by waiting for at least one frame message.
     let mut thin_reader = thin_client
         ._master
+        .as_ref()
+        .expect("has master")
         .try_clone_reader()
         .expect("clone client PTY reader");
     let attached_before_kill = {
@@ -672,6 +682,7 @@ fn server_crash_after_attach_causes_lost_connection_error() {
     };
     assert!(exited, "thin client should exit after server SIGKILL");
 
+    thin_client.close_master();
     let status = thin_client.child.wait().expect("wait thin client status");
     assert!(
         !status.success(),
@@ -697,6 +708,7 @@ fn server_crash_after_attach_causes_lost_connection_error() {
     );
 
     // Ensure server is gone.
+    spawned.close_master();
     let _ = spawned.child.wait();
 
     cleanup_test_base(&base);
@@ -926,6 +938,7 @@ fn graceful_shutdown_sends_server_shutdown_to_client() {
     }
 
     // Wait for the server to exit.
+    spawned.close_master();
     let _ = spawned.child.wait();
 
     drop(spawned);
@@ -979,7 +992,7 @@ fn client_receives_notify_on_agent_state_change() {
     drop(pair.slave);
 
     let spawned = SpawnedHerdr {
-        _master: pair.master,
+        _master: Some(pair.master),
         child,
     };
     wait_for_socket(&api_socket, Duration::from_secs(10));
