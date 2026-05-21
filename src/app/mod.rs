@@ -348,6 +348,7 @@ impl App {
             request_clipboard_write: None,
             creating_new_tab: false,
             requested_new_tab_name: None,
+            requested_new_workspace_path: None,
             rename_pane_target: None,
             request_complete_onboarding: false,
             name_input: String::new(),
@@ -1047,6 +1048,7 @@ impl App {
     /// Uses the standalone handler functions that work on `&mut AppState`
     /// since the server doesn't have the async context of the monolithic App.
     fn handle_non_terminal_key(&mut self, key: crate::input::TerminalKey) {
+        let previous_toast = self.state.toast.clone();
         let key_event = key.as_key_event();
         match self.state.mode {
             Mode::Prefix => {
@@ -1055,7 +1057,7 @@ impl App {
             Mode::Navigate => {
                 self.handle_navigate_key(key);
             }
-            Mode::RenameWorkspace | Mode::RenameTab | Mode::RenamePane => {
+            Mode::RenameWorkspace | Mode::RenameTab | Mode::RenamePane | Mode::NewWorkspacePath => {
                 input::handle_rename_key(&mut self.state, key_event);
             }
             Mode::Resize => {
@@ -1089,6 +1091,7 @@ impl App {
                 // Should not be called in terminal mode.
             }
         }
+        self.sync_toast_deadline(previous_toast);
     }
 
     /// Handles a mouse event for the headless server.

@@ -54,6 +54,7 @@ use super::App;
 
 impl App {
     pub(super) async fn handle_key(&mut self, key: TerminalKey) {
+        let previous_toast = self.state.toast.clone();
         match self.state.mode {
             Mode::Terminal => self.handle_terminal_key(key).await,
             Mode::Prefix => self.handle_prefix_key(key),
@@ -65,9 +66,10 @@ impl App {
                     Mode::ReleaseNotes => self.handle_release_notes_key(key_event),
                     Mode::ProductAnnouncement => self.handle_product_announcement_key(key_event),
                     Mode::Prefix | Mode::Navigate => unreachable!(),
-                    Mode::RenameWorkspace | Mode::RenameTab | Mode::RenamePane => {
-                        handle_rename_key(&mut self.state, key_event)
-                    }
+                    Mode::RenameWorkspace
+                    | Mode::RenameTab
+                    | Mode::RenamePane
+                    | Mode::NewWorkspacePath => handle_rename_key(&mut self.state, key_event),
                     Mode::Resize => handle_resize_key(&mut self.state, key),
                     Mode::ConfirmClose => handle_confirm_close_key(&mut self.state, key_event),
                     Mode::ContextMenu => handle_context_menu_key(&mut self.state, key_event),
@@ -78,6 +80,7 @@ impl App {
                 }
             }
         }
+        self.sync_toast_deadline(previous_toast);
     }
 
     pub(super) async fn handle_paste(&mut self, text: String) {
@@ -157,7 +160,9 @@ impl App {
     }
 
     pub(super) fn handle_mouse(&mut self, mouse: MouseEvent) {
+        let previous_toast = self.state.toast.clone();
         if self.handle_overlay_mouse(mouse) {
+            self.sync_toast_deadline(previous_toast);
             return;
         }
 
@@ -177,6 +182,7 @@ impl App {
                 self.state.sidebar_width_auto = false;
                 self.state.mark_session_dirty();
                 self.state.drag = None;
+                self.sync_toast_deadline(previous_toast);
                 return;
             }
         }
@@ -223,6 +229,7 @@ impl App {
             self.selection_autoscroll_deadline =
                 Some(std::time::Instant::now() + super::SELECTION_AUTOSCROLL_INTERVAL);
         }
+        self.sync_toast_deadline(previous_toast);
     }
 }
 

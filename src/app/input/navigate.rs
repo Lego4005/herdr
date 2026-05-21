@@ -602,8 +602,7 @@ pub(super) fn execute_navigate_action_in_context(
     let previous_mode = state.mode;
     match action {
         NavigateAction::NewWorkspace => {
-            state.request_new_workspace = true;
-            leave_navigate_mode(state);
+            super::modal::open_new_workspace_path(state);
         }
         NavigateAction::RenameWorkspace => {
             if !state.workspaces.is_empty() {
@@ -884,8 +883,8 @@ mod tests {
             KeyEvent::new(KeyCode::Char('g'), KeyModifiers::empty()),
         );
 
-        assert!(state.request_new_workspace);
-        assert_eq!(state.mode, Mode::Terminal);
+        assert!(!state.request_new_workspace);
+        assert_eq!(state.mode, Mode::NewWorkspacePath);
     }
 
     #[test]
@@ -1050,8 +1049,8 @@ mod tests {
 
         app.handle_navigate_key(TerminalKey::new(KeyCode::Char('n'), KeyModifiers::SHIFT));
 
-        assert!(app.state.request_new_workspace);
-        assert_eq!(app.state.mode, Mode::Terminal);
+        assert!(!app.state.request_new_workspace);
+        assert_eq!(app.state.mode, Mode::NewWorkspacePath);
     }
 
     #[tokio::test]

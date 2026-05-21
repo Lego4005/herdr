@@ -168,7 +168,10 @@ impl AppState {
 
                 if matches!(
                     self.mode,
-                    Mode::RenameWorkspace | Mode::RenameTab | Mode::RenamePane
+                    Mode::RenameWorkspace
+                        | Mode::RenameTab
+                        | Mode::RenamePane
+                        | Mode::NewWorkspacePath
                 ) {
                     let action = self
                         .rename_modal_inner()
@@ -307,7 +310,7 @@ impl AppState {
                         && mouse.column >= new_button.x
                         && mouse.column < new_button.x + new_button.width;
                     if on_new_button {
-                        self.request_new_workspace = true;
+                        super::modal::open_new_workspace_path(self);
                         return None;
                     }
 
@@ -798,7 +801,7 @@ impl AppState {
 
         match crate::ui::mobile_switcher_target_at(self, mouse.column, mouse.row) {
             Some(crate::ui::MobileSwitcherTarget::NewWorkspace) => {
-                self.request_new_workspace = true;
+                super::modal::open_new_workspace_path(self);
             }
             Some(crate::ui::MobileSwitcherTarget::Workspace(ws_idx)) => {
                 self.switch_workspace(ws_idx);
@@ -2152,9 +2155,9 @@ mod tests {
             viewport.x + 2,
             viewport.y + 1,
         ));
-        assert!(app.state.request_new_workspace);
+        assert_eq!(app.state.mode, Mode::NewWorkspacePath);
+        assert!(!app.state.request_new_workspace);
 
-        app.state.request_new_workspace = false;
         app.state.mode = Mode::Navigate;
         app.handle_mouse(mouse(
             MouseEventKind::Down(MouseButton::Left),

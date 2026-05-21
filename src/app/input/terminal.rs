@@ -263,7 +263,7 @@ impl App {
                         }
                         KeyCode::Backspace => {
                             search_query.pop();
-                            let favorites = crate::config::load_favorites(cwd);
+                            let favorites = crate::config::load_favorites(identity_cwd);
                             *files = crate::app::state::build_explorer_entries(
                                 cwd,
                                 *is_tree_view,
@@ -278,7 +278,7 @@ impl App {
                         }
                         KeyCode::Char(c) => {
                             search_query.push(c);
-                            let favorites = crate::config::load_favorites(cwd);
+                            let favorites = crate::config::load_favorites(identity_cwd);
                             *files = crate::app::state::build_explorer_entries(
                                 cwd,
                                 *is_tree_view,
@@ -346,7 +346,7 @@ impl App {
                         }
                         KeyCode::Char('t') => {
                             *is_tree_view = !*is_tree_view;
-                            let favorites = crate::config::load_favorites(cwd);
+                            let favorites = crate::config::load_favorites(identity_cwd);
                             *files = crate::app::state::build_explorer_entries(
                                 cwd,
                                 *is_tree_view,
@@ -361,7 +361,7 @@ impl App {
                         }
                         KeyCode::Char('f') => {
                             *filter_md = !*filter_md;
-                            let favorites = crate::config::load_favorites(cwd);
+                            let favorites = crate::config::load_favorites(identity_cwd);
                             *files = crate::app::state::build_explorer_entries(
                                 cwd,
                                 *is_tree_view,
@@ -376,7 +376,7 @@ impl App {
                         }
                         KeyCode::Char('s') => {
                             *sort_by_mtime = !*sort_by_mtime;
-                            let favorites = crate::config::load_favorites(cwd);
+                            let favorites = crate::config::load_favorites(identity_cwd);
                             *files = crate::app::state::build_explorer_entries(
                                 cwd,
                                 *is_tree_view,
@@ -394,7 +394,7 @@ impl App {
                                 let path = entry.path.clone();
                                 let is_fav = entry.is_favorite;
                                 crate::config::save_favorite(identity_cwd, &path, !is_fav);
-                                let favorites = crate::config::load_favorites(cwd);
+                                let favorites = crate::config::load_favorites(identity_cwd);
                                 *files = crate::app::state::build_explorer_entries(
                                     cwd,
                                     *is_tree_view,
@@ -424,7 +424,7 @@ impl App {
                                     } else {
                                         expanded_dirs.insert(path);
                                     }
-                                    let favorites = crate::config::load_favorites(cwd);
+                                    let favorites = crate::config::load_favorites(identity_cwd);
                                     *files = crate::app::state::build_explorer_entries(
                                         cwd,
                                         *is_tree_view,
@@ -452,7 +452,7 @@ impl App {
                             if let Some(entry) = files.get(*selected_index) {
                                 if entry.is_dir && entry.is_expanded {
                                     expanded_dirs.remove(&entry.path);
-                                    let favorites = crate::config::load_favorites(cwd);
+                                    let favorites = crate::config::load_favorites(identity_cwd);
                                     *files = crate::app::state::build_explorer_entries(
                                         cwd,
                                         *is_tree_view,

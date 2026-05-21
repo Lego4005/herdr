@@ -602,6 +602,7 @@ pub enum Mode {
     Settings,
     GlobalMenu,
     KeybindHelp,
+    NewWorkspacePath,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -917,6 +918,7 @@ pub struct AppState {
     pub request_clipboard_write: Option<Vec<u8>>,
     pub creating_new_tab: bool,
     pub requested_new_tab_name: Option<String>,
+    pub requested_new_workspace_path: Option<std::path::PathBuf>,
     pub rename_pane_target: Option<PaneId>,
     pub request_complete_onboarding: bool,
     pub name_input: String,
@@ -1137,11 +1139,17 @@ impl AppState {
             Some(ws) => ws,
             None => return,
         };
-        let cwd = ws.identity_cwd.clone();
         let pane_id = match ws.focused_pane_id() {
             Some(pid) => pid,
             None => return,
         };
+        let identity_cwd = ws.identity_cwd.clone();
+        let resolved_cwd = ws
+            .active_tab()
+            .and_then(|tab| tab.cwd_for_pane(pane_id, &self.terminals, &self.terminal_runtimes))
+            .filter(|p| p.is_dir())
+            .unwrap_or_else(|| identity_cwd.clone());
+
         let pane = match ws.pane_state_mut(pane_id) {
             Some(p) => p,
             None => return,
@@ -1149,15 +1157,15 @@ impl AppState {
 
         match &pane.mode {
             PaneMode::Terminal => {
-                let favorites = crate::config::load_favorites(&cwd);
+                let favorites = crate::config::load_favorites(&identity_cwd);
                 let is_tree_view = true;
                 let mut expanded_dirs = std::collections::HashSet::new();
-                expanded_dirs.insert(cwd.clone());
+                expanded_dirs.insert(resolved_cwd.clone());
                 let filter_md = false;
                 let sort_by_mtime = false;
 
                 let files = build_explorer_entries(
-                    &cwd,
+                    &resolved_cwd,
                     is_tree_view,
                     &expanded_dirs,
                     "",
@@ -1167,7 +1175,7 @@ impl AppState {
                 );
 
                 pane.mode = PaneMode::FileExplorer {
-                    cwd,
+                    cwd: resolved_cwd,
                     selected_index: 0,
                     files,
                     scroll: 0,
@@ -1484,6 +1492,7 @@ impl AppState {
             request_clipboard_write: None,
             creating_new_tab: false,
             requested_new_tab_name: None,
+            requested_new_workspace_path: None,
             rename_pane_target: None,
             request_complete_onboarding: false,
             name_input: String::new(),

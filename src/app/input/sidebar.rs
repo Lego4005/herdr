@@ -318,6 +318,7 @@ impl AppState {
                 | Mode::Settings
                 | Mode::GlobalMenu
                 | Mode::KeybindHelp
+                | Mode::NewWorkspacePath
         ) {
             Some(self.selected)
         } else {

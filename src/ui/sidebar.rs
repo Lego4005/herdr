@@ -79,6 +79,7 @@ fn agent_panel_current_workspace_idx(app: &AppState) -> Option<usize> {
             | Mode::GlobalMenu
             | Mode::KeybindHelp
             | Mode::ProductAnnouncement
+            | Mode::NewWorkspacePath
     ) {
         Some(app.selected)
     } else {

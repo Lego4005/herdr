@@ -202,6 +202,19 @@ pub(super) fn open_rename_pane(state: &mut AppState, pane_id: crate::layout::Pan
     state.mode = Mode::RenamePane;
 }
 
+pub(super) fn open_new_workspace_path(state: &mut AppState) {
+    state.creating_new_tab = false;
+    state.requested_new_tab_name = None;
+    state.rename_pane_target = None;
+    state.name_input = state
+        .active
+        .and_then(|idx| state.workspaces.get(idx))
+        .map(|ws| ws.identity_cwd.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    state.name_input_replace_on_type = false;
+    state.mode = Mode::NewWorkspacePath;
+}
+
 fn next_new_tab_default_name(state: &AppState) -> String {
     state
         .active
@@ -274,6 +287,22 @@ pub(super) const SETTINGS_ACTIONS: &[ModalActionSpec<ModalAction>] = &[
     },
 ];
 
+fn expand_tilde(path_str: &str) -> std::path::PathBuf {
+    if path_str.starts_with('~') {
+        let home = std::env::var("HOME")
+            .or_else(|_| std::env::var("USERPROFILE"))
+            .unwrap_or_default();
+        if !home.is_empty() {
+            if path_str == "~" {
+                return std::path::PathBuf::from(home);
+            } else if let Some(stripped) = path_str.strip_prefix("~/") {
+                return std::path::PathBuf::from(home).join(stripped);
+            }
+        }
+    }
+    std::path::PathBuf::from(path_str)
+}
+
 pub(super) fn apply_rename_action(state: &mut AppState, action: ModalAction) {
     match action {
         ModalAction::Save => {
@@ -283,6 +312,34 @@ pub(super) fn apply_rename_action(state: &mut AppState, action: ModalAction) {
                 state.name_input.trim().to_string()
             };
             match state.mode {
+                Mode::NewWorkspacePath => {
+                    let path_str = state.name_input.trim().to_string();
+                    if !path_str.is_empty() {
+                        let expanded_path = expand_tilde(&path_str);
+                        if expanded_path.exists() && expanded_path.is_dir() {
+                            state.requested_new_workspace_path = Some(expanded_path);
+                            state.request_new_workspace = true;
+                        } else {
+                            state.toast = Some(crate::app::state::ToastNotification {
+                                kind: crate::app::state::ToastKind::NeedsAttention,
+                                title: "invalid workspace path".to_string(),
+                                context: format!("Directory does not exist: {}", path_str),
+                                target: None,
+                            });
+                            // Keep the modal open
+                            return;
+                        }
+                    } else {
+                        state.toast = Some(crate::app::state::ToastNotification {
+                            kind: crate::app::state::ToastKind::NeedsAttention,
+                            title: "invalid workspace path".to_string(),
+                            context: "Path cannot be empty".to_string(),
+                            target: None,
+                        });
+                        // Keep the modal open
+                        return;
+                    }
+                }
                 Mode::RenameWorkspace if !state.workspaces.is_empty() && !new_name.is_empty() => {
                     let workspace_id = state.workspaces[state.selected].id.clone();
                     state.workspaces[state.selected].set_custom_name(new_name);
@@ -346,6 +403,7 @@ pub(super) fn apply_rename_action(state: &mut AppState, action: ModalAction) {
         ModalAction::Cancel => {
             state.creating_new_tab = false;
             state.requested_new_tab_name = None;
+            state.requested_new_workspace_path = None;
             state.rename_pane_target = None;
             state.name_input.clear();
             state.name_input_replace_on_type = false;
@@ -1001,5 +1059,79 @@ mod tests {
             KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()),
         );
         assert_eq!(state.workspaces.len(), 1);
+    }
+
+    #[test]
+    fn test_new_workspace_path_modal_behavior() {
+        let mut state = state_with_workspaces(&["a"]);
+        state.active = Some(0);
+        state.selected = 0;
+
+        // 1. Check open_new_workspace_path pre-fills correctly
+        open_new_workspace_path(&mut state);
+        assert_eq!(state.mode, Mode::NewWorkspacePath);
+        assert_eq!(
+            state.name_input,
+            state.workspaces[0].identity_cwd.to_string_lossy()
+        );
+
+        // 2. Cancel behavior
+        apply_rename_action(&mut state, ModalAction::Cancel);
+        assert_eq!(state.mode, Mode::Terminal);
+        assert!(state.requested_new_workspace_path.is_none());
+        assert!(state.name_input.is_empty());
+
+        // Re-open
+        open_new_workspace_path(&mut state);
+
+        // 3. Submit empty path -> error toast and modal stays open
+        state.name_input = "".to_string();
+        apply_rename_action(&mut state, ModalAction::Save);
+        assert_eq!(state.mode, Mode::NewWorkspacePath);
+        assert!(state.toast.is_some());
+        assert_eq!(
+            state.toast.as_ref().unwrap().title,
+            "invalid workspace path"
+        );
+        assert!(state.requested_new_workspace_path.is_none());
+
+        // 4. Submit non-existent path -> error toast and modal stays open
+        state.name_input = "/nonexistent-dir-herdr-test-xyz".to_string();
+        apply_rename_action(&mut state, ModalAction::Save);
+        assert_eq!(state.mode, Mode::NewWorkspacePath);
+        assert_eq!(
+            state.toast.as_ref().unwrap().title,
+            "invalid workspace path"
+        );
+        assert!(state.requested_new_workspace_path.is_none());
+
+        // 5. Submit valid path -> success: modal closes, path saved, workspace requested
+        let temp_dir = std::env::temp_dir();
+        state.name_input = temp_dir.to_string_lossy().to_string();
+        apply_rename_action(&mut state, ModalAction::Save);
+        assert_eq!(state.mode, Mode::Terminal);
+        assert_eq!(state.requested_new_workspace_path, Some(temp_dir));
+        assert!(state.request_new_workspace);
+    }
+
+    #[test]
+    fn test_expand_tilde_helper() {
+        let old_home = std::env::var("HOME");
+        std::env::set_var("HOME", "/mocked-home");
+
+        assert_eq!(expand_tilde("~"), std::path::PathBuf::from("/mocked-home"));
+        assert_eq!(
+            expand_tilde("~/foo/bar"),
+            std::path::PathBuf::from("/mocked-home/foo/bar")
+        );
+        assert_eq!(
+            expand_tilde("/some/other/path"),
+            std::path::PathBuf::from("/some/other/path")
+        );
+
+        match old_home {
+            Ok(val) => std::env::set_var("HOME", val),
+            Err(_) => std::env::remove_var("HOME"),
+        }
     }
 }
