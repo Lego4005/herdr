@@ -213,8 +213,7 @@ impl App {
 
         let is_custom_mode = matches!(
             pane.mode,
-            crate::pane::state::PaneMode::FileExplorer { .. }
-                | crate::pane::state::PaneMode::MarkdownViewer { .. }
+            crate::pane::state::PaneMode::MarkdownViewer { .. }
         );
 
         if is_custom_mode {
@@ -233,266 +232,18 @@ impl App {
     fn handle_custom_mode_key_internal(
         key: TerminalKey,
         pane: &mut crate::pane::state::PaneState,
-        pane_height: usize,
-        identity_cwd: &std::path::Path,
+        _pane_height: usize,
+        _identity_cwd: &std::path::Path,
     ) {
         let key_event = key.as_key_event();
-        match &mut pane.mode {
-            crate::pane::state::PaneMode::FileExplorer {
-                cwd,
-                selected_index,
-                files,
-                scroll,
-                search_query,
-                search_mode,
-                is_tree_view,
-                expanded_dirs,
-                filter_md,
-                sort_by_mtime,
-            } => {
-                let visible_height = pane_height.saturating_sub(5).max(1);
-
-                if !files.is_empty() && *selected_index >= files.len() {
-                    *selected_index = files.len() - 1;
-                }
-
-                if *search_mode {
-                    match key_event.code {
-                        KeyCode::Esc | KeyCode::Enter => {
-                            *search_mode = false;
-                        }
-                        KeyCode::Backspace => {
-                            search_query.pop();
-                            let favorites = crate::config::load_favorites(identity_cwd);
-                            *files = crate::app::state::build_explorer_entries(
-                                cwd,
-                                *is_tree_view,
-                                expanded_dirs,
-                                search_query,
-                                *filter_md,
-                                *sort_by_mtime,
-                                &favorites,
-                            );
-                            *selected_index = 0;
-                            *scroll = 0;
-                        }
-                        KeyCode::Char(c) => {
-                            search_query.push(c);
-                            let favorites = crate::config::load_favorites(identity_cwd);
-                            *files = crate::app::state::build_explorer_entries(
-                                cwd,
-                                *is_tree_view,
-                                expanded_dirs,
-                                search_query,
-                                *filter_md,
-                                *sort_by_mtime,
-                                &favorites,
-                            );
-                            *selected_index = 0;
-                            *scroll = 0;
-                        }
-                        _ => {}
-                    }
-                } else {
-                    match key_event.code {
-                        KeyCode::Up | KeyCode::Char('k') => {
-                            if !files.is_empty() {
-                                *selected_index = selected_index.saturating_sub(1);
-                                *scroll = crate::app::state::calculate_scroll(
-                                    *selected_index,
-                                    *scroll,
-                                    visible_height,
-                                    files.len(),
-                                );
-                            }
-                        }
-                        KeyCode::Down | KeyCode::Char('j') => {
-                            if !files.is_empty() {
-                                *selected_index = (*selected_index + 1).min(files.len() - 1);
-                                *scroll = crate::app::state::calculate_scroll(
-                                    *selected_index,
-                                    *scroll,
-                                    visible_height,
-                                    files.len(),
-                                );
-                            }
-                        }
-                        KeyCode::PageUp => {
-                            if !files.is_empty() {
-                                *selected_index = selected_index.saturating_sub(visible_height);
-                                *scroll = crate::app::state::calculate_scroll(
-                                    *selected_index,
-                                    *scroll,
-                                    visible_height,
-                                    files.len(),
-                                );
-                            }
-                        }
-                        KeyCode::PageDown => {
-                            if !files.is_empty() {
-                                *selected_index =
-                                    (*selected_index + visible_height).min(files.len() - 1);
-                                *scroll = crate::app::state::calculate_scroll(
-                                    *selected_index,
-                                    *scroll,
-                                    visible_height,
-                                    files.len(),
-                                );
-                            }
-                        }
-                        KeyCode::Char('/') => {
-                            *search_mode = true;
-                            *search_query = String::new();
-                        }
-                        KeyCode::Char('t') => {
-                            *is_tree_view = !*is_tree_view;
-                            let favorites = crate::config::load_favorites(identity_cwd);
-                            *files = crate::app::state::build_explorer_entries(
-                                cwd,
-                                *is_tree_view,
-                                expanded_dirs,
-                                search_query,
-                                *filter_md,
-                                *sort_by_mtime,
-                                &favorites,
-                            );
-                            *selected_index = 0;
-                            *scroll = 0;
-                        }
-                        KeyCode::Char('f') => {
-                            *filter_md = !*filter_md;
-                            let favorites = crate::config::load_favorites(identity_cwd);
-                            *files = crate::app::state::build_explorer_entries(
-                                cwd,
-                                *is_tree_view,
-                                expanded_dirs,
-                                search_query,
-                                *filter_md,
-                                *sort_by_mtime,
-                                &favorites,
-                            );
-                            *selected_index = 0;
-                            *scroll = 0;
-                        }
-                        KeyCode::Char('s') => {
-                            *sort_by_mtime = !*sort_by_mtime;
-                            let favorites = crate::config::load_favorites(identity_cwd);
-                            *files = crate::app::state::build_explorer_entries(
-                                cwd,
-                                *is_tree_view,
-                                expanded_dirs,
-                                search_query,
-                                *filter_md,
-                                *sort_by_mtime,
-                                &favorites,
-                            );
-                            *selected_index = 0;
-                            *scroll = 0;
-                        }
-                        KeyCode::Char('a') => {
-                            if let Some(entry) = files.get(*selected_index) {
-                                let path = entry.path.clone();
-                                let is_fav = entry.is_favorite;
-                                crate::config::save_favorite(identity_cwd, &path, !is_fav);
-                                let favorites = crate::config::load_favorites(identity_cwd);
-                                *files = crate::app::state::build_explorer_entries(
-                                    cwd,
-                                    *is_tree_view,
-                                    expanded_dirs,
-                                    search_query,
-                                    *filter_md,
-                                    *sort_by_mtime,
-                                    &favorites,
-                                );
-                                if let Some(pos) = files.iter().position(|f| f.path == path) {
-                                    *selected_index = pos;
-                                }
-                                *scroll = crate::app::state::calculate_scroll(
-                                    *selected_index,
-                                    *scroll,
-                                    visible_height,
-                                    files.len(),
-                                );
-                            }
-                        }
-                        KeyCode::Enter | KeyCode::Char('l') | KeyCode::Right => {
-                            if let Some(entry) = files.get(*selected_index) {
-                                if entry.is_dir {
-                                    let path = entry.path.clone();
-                                    if expanded_dirs.contains(&path) {
-                                        expanded_dirs.remove(&path);
-                                    } else {
-                                        expanded_dirs.insert(path);
-                                    }
-                                    let favorites = crate::config::load_favorites(identity_cwd);
-                                    *files = crate::app::state::build_explorer_entries(
-                                        cwd,
-                                        *is_tree_view,
-                                        expanded_dirs,
-                                        search_query,
-                                        *filter_md,
-                                        *sort_by_mtime,
-                                        &favorites,
-                                    );
-                                } else {
-                                    let path = entry.path.clone();
-                                    if let Ok(content) = std::fs::read_to_string(&path) {
-                                        let lines = content.lines().map(String::from).collect();
-                                        pane.mode = crate::pane::state::PaneMode::MarkdownViewer {
-                                            path,
-                                            content,
-                                            scroll: 0,
-                                            lines,
-                                        };
-                                    }
-                                }
-                            }
-                        }
-                        KeyCode::Char('h') | KeyCode::Left => {
-                            if let Some(entry) = files.get(*selected_index) {
-                                if entry.is_dir && entry.is_expanded {
-                                    expanded_dirs.remove(&entry.path);
-                                    let favorites = crate::config::load_favorites(identity_cwd);
-                                    *files = crate::app::state::build_explorer_entries(
-                                        cwd,
-                                        *is_tree_view,
-                                        expanded_dirs,
-                                        search_query,
-                                        *filter_md,
-                                        *sort_by_mtime,
-                                        &favorites,
-                                    );
-                                } else if let Some(parent) = entry.path.parent() {
-                                    if parent.starts_with(cwd.as_path()) && parent != cwd.as_path()
-                                    {
-                                        if let Some(pos) =
-                                            files.iter().position(|f| f.path == parent)
-                                        {
-                                            *selected_index = pos;
-                                            *scroll = crate::app::state::calculate_scroll(
-                                                *selected_index,
-                                                *scroll,
-                                                visible_height,
-                                                files.len(),
-                                            );
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                        KeyCode::Esc | KeyCode::Char('q') => {
-                            pane.mode = crate::pane::state::PaneMode::Terminal;
-                        }
-                        _ => {}
-                    }
-                }
-            }
-            crate::pane::state::PaneMode::MarkdownViewer {
-                path,
-                content: _,
-                scroll,
-                lines,
-            } => match key_event.code {
+        if let crate::pane::state::PaneMode::MarkdownViewer {
+            path,
+            content: _,
+            scroll,
+            lines,
+        } = &mut pane.mode
+        {
+            match key_event.code {
                 KeyCode::Up | KeyCode::Char('k') => {
                     if *scroll > 0 {
                         *scroll -= 1;
@@ -510,55 +261,13 @@ impl App {
                     *scroll = std::cmp::min(lines.len().saturating_sub(1), *scroll + 15);
                 }
                 KeyCode::Esc | KeyCode::Char('q') => {
-                    let explorer_cwd = identity_cwd.to_path_buf();
-                    let favorites = crate::config::load_favorites(&explorer_cwd);
-                    let is_tree_view = true;
-                    let mut expanded_dirs = std::collections::HashSet::new();
-                    expanded_dirs.insert(explorer_cwd.clone());
-
-                    // Expand all ancestor directories of the file we just closed
-                    let mut ancestor = path.parent();
-                    while let Some(anc) = ancestor {
-                        if anc.starts_with(&explorer_cwd) {
-                            expanded_dirs.insert(anc.to_path_buf());
-                            ancestor = anc.parent();
-                        } else {
-                            break;
-                        }
-                    }
-
-                    let filter_md = false;
-                    let sort_by_mtime = false;
-                    let files = crate::app::state::build_explorer_entries(
-                        &explorer_cwd,
-                        is_tree_view,
-                        &expanded_dirs,
-                        "",
-                        filter_md,
-                        sort_by_mtime,
-                        &favorites,
-                    );
-
-                    let selected_index = files.iter().position(|f| f.path == *path).unwrap_or(0);
-                    pane.mode = crate::pane::state::PaneMode::FileExplorer {
-                        cwd: explorer_cwd,
-                        selected_index,
-                        files,
-                        scroll: 0,
-                        search_query: String::new(),
-                        search_mode: false,
-                        is_tree_view,
-                        expanded_dirs,
-                        filter_md,
-                        sort_by_mtime,
-                    };
+                    pane.mode = crate::pane::state::PaneMode::Terminal;
                 }
                 KeyCode::Char('w') => {
                     let _ = crate::app::web_launcher::launch_web_viewer(path);
                 }
                 _ => {}
-            },
-            _ => {}
+            }
         }
     }
 }
@@ -572,7 +281,7 @@ mod tests {
         app_for_mouse_test, mouse, numbered_lines_bytes, unique_temp_path, wait_for_file,
     };
     use super::*;
-    use crate::{config::Config, pane::state::PaneMode, workspace::Workspace};
+    use crate::{config::Config, workspace::Workspace};
 
     #[tokio::test]
     async fn dragging_selection_above_pane_autoscrolls_and_extends_into_scrollback() {
@@ -1254,187 +963,5 @@ mod tests {
             .expect("scroll metrics after PageUp");
         // Forwarded to pane, so test runtime doesn't process it — scroll stays at bottom.
         assert_eq!(end_metrics.offset_from_bottom, 0);
-    }
-
-    #[test]
-    fn test_custom_mode_backspace() {
-        let mut app = app_for_mouse_test();
-        let mut ws = Workspace::test_new("test");
-        let pane_id = ws.tabs[0].root_pane;
-
-        let files = vec![
-            crate::pane::state::FileEntry {
-                name: "file_a.txt".into(),
-                path: std::path::PathBuf::from("file_a.txt"),
-                is_dir: false,
-                depth: 0,
-                is_expanded: false,
-                is_favorite: false,
-            },
-            crate::pane::state::FileEntry {
-                name: "file_b.txt".into(),
-                path: std::path::PathBuf::from("file_b.txt"),
-                is_dir: false,
-                depth: 0,
-                is_expanded: false,
-                is_favorite: false,
-            },
-        ];
-
-        ws.tabs[0].panes.get_mut(&pane_id).unwrap().mode = PaneMode::FileExplorer {
-            cwd: std::path::PathBuf::from("."),
-            selected_index: 0,
-            files,
-            scroll: 0,
-            search_query: "file_a".to_string(),
-            search_mode: true,
-            is_tree_view: true,
-            expanded_dirs: std::collections::HashSet::new(),
-            filter_md: false,
-            sort_by_mtime: false,
-        };
-
-        app.state.workspaces = vec![ws];
-        app.state.active = Some(0);
-
-        let pane = app.state.workspaces[0].tabs[0]
-            .panes
-            .get_mut(&pane_id)
-            .unwrap();
-
-        // Handle Backspace
-        App::handle_custom_mode_key_internal(
-            TerminalKey::new(KeyCode::Backspace, KeyModifiers::empty()),
-            pane,
-            24,
-            &std::path::PathBuf::from("."),
-        );
-
-        let updated_pane = &app.state.workspaces[0].tabs[0].panes[&pane_id];
-        if let PaneMode::FileExplorer {
-            search_query,
-            selected_index,
-            scroll,
-            ..
-        } = &updated_pane.mode
-        {
-            assert_eq!(search_query, "file_");
-            assert_eq!(*selected_index, 0);
-            assert_eq!(*scroll, 0);
-        } else {
-            panic!("Expected FileExplorer mode");
-        }
-    }
-
-    #[test]
-    fn test_custom_mode_type_search() {
-        let mut app = app_for_mouse_test();
-        let mut ws = Workspace::test_new("test");
-        let pane_id = ws.tabs[0].root_pane;
-
-        let files = vec![crate::pane::state::FileEntry {
-            name: "file_a.txt".into(),
-            path: std::path::PathBuf::from("file_a.txt"),
-            is_dir: false,
-            depth: 0,
-            is_expanded: false,
-            is_favorite: false,
-        }];
-
-        ws.tabs[0].panes.get_mut(&pane_id).unwrap().mode = PaneMode::FileExplorer {
-            cwd: std::path::PathBuf::from("."),
-            selected_index: 0,
-            files,
-            scroll: 0,
-            search_query: String::new(),
-            search_mode: true,
-            is_tree_view: true,
-            expanded_dirs: std::collections::HashSet::new(),
-            filter_md: false,
-            sort_by_mtime: false,
-        };
-
-        app.state.workspaces = vec![ws];
-        app.state.active = Some(0);
-
-        let pane = app.state.workspaces[0].tabs[0]
-            .panes
-            .get_mut(&pane_id)
-            .unwrap();
-
-        // Type 'a'
-        App::handle_custom_mode_key_internal(
-            TerminalKey::new(KeyCode::Char('a'), KeyModifiers::empty()),
-            pane,
-            24,
-            &std::path::PathBuf::from("."),
-        );
-
-        let updated_pane = &app.state.workspaces[0].tabs[0].panes[&pane_id];
-        if let PaneMode::FileExplorer {
-            search_query,
-            selected_index,
-            scroll,
-            ..
-        } = &updated_pane.mode
-        {
-            assert_eq!(search_query, "a");
-            assert_eq!(*selected_index, 0);
-            assert_eq!(*scroll, 0);
-        } else {
-            panic!("Expected FileExplorer mode");
-        }
-    }
-
-    #[test]
-    fn test_custom_mode_toggle_search() {
-        let mut app = app_for_mouse_test();
-        let mut ws = Workspace::test_new("test");
-        let pane_id = ws.tabs[0].root_pane;
-
-        let files = vec![crate::pane::state::FileEntry {
-            name: "file_a.txt".into(),
-            path: std::path::PathBuf::from("file_a.txt"),
-            is_dir: false,
-            depth: 0,
-            is_expanded: false,
-            is_favorite: false,
-        }];
-
-        ws.tabs[0].panes.get_mut(&pane_id).unwrap().mode = PaneMode::FileExplorer {
-            cwd: std::path::PathBuf::from("."),
-            selected_index: 0,
-            files,
-            scroll: 0,
-            search_query: String::new(),
-            search_mode: false,
-            is_tree_view: true,
-            expanded_dirs: std::collections::HashSet::new(),
-            filter_md: false,
-            sort_by_mtime: false,
-        };
-
-        app.state.workspaces = vec![ws];
-        app.state.active = Some(0);
-
-        let pane = app.state.workspaces[0].tabs[0]
-            .panes
-            .get_mut(&pane_id)
-            .unwrap();
-
-        // Press '/' to toggle search mode
-        App::handle_custom_mode_key_internal(
-            TerminalKey::new(KeyCode::Char('/'), KeyModifiers::empty()),
-            pane,
-            24,
-            &std::path::PathBuf::from("."),
-        );
-
-        let updated_pane = &app.state.workspaces[0].tabs[0].panes[&pane_id];
-        if let PaneMode::FileExplorer { search_mode, .. } = &updated_pane.mode {
-            assert!(*search_mode);
-        } else {
-            panic!("Expected FileExplorer mode");
-        }
     }
 }

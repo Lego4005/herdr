@@ -30,7 +30,7 @@ pub(crate) struct SelectionAutoscroll {
     pub last_mouse_screen_row: u16,
     pub inner_rect: Rect,
 }
-use crate::pane::state::{FileEntry, PaneMode};
+use crate::pane::state::FileEntry;
 use crate::terminal_theme::TerminalTheme;
 use crate::workspace::Workspace;
 
@@ -571,6 +571,7 @@ pub enum ViewLayout {
 pub struct ViewState {
     pub layout: ViewLayout,
     pub sidebar_rect: Rect,
+    pub global_explorer_rect: Rect,
     pub workspace_card_areas: Vec<WorkspaceCardArea>,
     pub tab_bar_rect: Rect,
     pub tab_hit_areas: Vec<Rect>,
@@ -603,6 +604,7 @@ pub enum Mode {
     GlobalMenu,
     KeybindHelp,
     NewWorkspacePath,
+    GlobalExplorer,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -890,6 +892,21 @@ pub enum SidebarWidthSource {
 
 /// All application state — pure data, no channels or async runtime.
 /// Testable without PTYs or a tokio runtime.
+#[derive(Debug, Default)]
+pub struct GlobalExplorerState {
+    pub open: bool,
+    pub cwd: std::path::PathBuf,
+    pub selected_index: usize,
+    pub files: Vec<FileEntry>,
+    pub scroll: usize,
+    pub search_query: String,
+    pub search_mode: bool,
+    pub is_tree_view: bool,
+    pub expanded_dirs: std::collections::HashSet<std::path::PathBuf>,
+    pub filter_md: bool,
+    pub sort_by_mtime: bool,
+}
+
 pub struct AppState {
     pub terminals:
         std::collections::HashMap<crate::terminal::TerminalId, crate::terminal::TerminalState>,
@@ -901,6 +918,7 @@ pub struct AppState {
     pub active: Option<usize>,
     pub selected: usize,
     pub mode: Mode,
+    pub global_explorer: GlobalExplorerState,
     pub should_quit: bool,
     /// In persistence mode, client quit actions detach instead of stopping the server.
     pub quit_detaches: bool,
@@ -1131,65 +1149,32 @@ impl AppState {
     }
 
     pub(crate) fn toggle_explorer_on_focused_pane(&mut self) {
-        let ws_idx = match self.active {
-            Some(idx) => idx,
-            None => return,
-        };
-        let ws = match self.workspaces.get_mut(ws_idx) {
-            Some(ws) => ws,
-            None => return,
-        };
-        let pane_id = match ws.focused_pane_id() {
-            Some(pid) => pid,
-            None => return,
-        };
-        let identity_cwd = ws.identity_cwd.clone();
-        let resolved_cwd = ws
-            .active_tab()
-            .and_then(|tab| tab.cwd_for_pane(pane_id, &self.terminals, &self.terminal_runtimes))
-            .filter(|p| p.is_dir())
-            .unwrap_or_else(|| identity_cwd.clone());
+        self.toggle_global_explorer();
+    }
 
-        let pane = match ws.pane_state_mut(pane_id) {
-            Some(p) => p,
-            None => return,
-        };
-
-        match &pane.mode {
-            PaneMode::Terminal => {
-                let favorites = crate::config::load_favorites(&identity_cwd);
-                let is_tree_view = true;
-                let mut expanded_dirs = std::collections::HashSet::new();
-                expanded_dirs.insert(resolved_cwd.clone());
-                let filter_md = false;
-                let sort_by_mtime = false;
-
-                let files = build_explorer_entries(
-                    &resolved_cwd,
-                    is_tree_view,
-                    &expanded_dirs,
-                    "",
-                    filter_md,
-                    sort_by_mtime,
-                    &favorites,
-                );
-
-                pane.mode = PaneMode::FileExplorer {
-                    cwd: resolved_cwd,
-                    selected_index: 0,
-                    files,
-                    scroll: 0,
-                    search_query: String::new(),
-                    search_mode: false,
-                    is_tree_view,
-                    expanded_dirs,
-                    filter_md,
-                    sort_by_mtime,
-                };
+    pub fn toggle_global_explorer(&mut self) {
+        self.global_explorer.open = !self.global_explorer.open;
+        if self.global_explorer.open {
+            self.mode = Mode::GlobalExplorer;
+            if self.global_explorer.cwd.as_os_str().is_empty() {
+                self.global_explorer.cwd = self
+                    .workspaces
+                    .get(self.active.unwrap_or(0))
+                    .map(|ws| ws.identity_cwd.clone())
+                    .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| "/".into()));
             }
-            PaneMode::FileExplorer { .. } | PaneMode::MarkdownViewer { .. } => {
-                pane.mode = PaneMode::Terminal;
-            }
+            let favorites = crate::config::load_favorites(&self.global_explorer.cwd);
+            self.global_explorer.files = build_explorer_entries(
+                &self.global_explorer.cwd,
+                self.global_explorer.is_tree_view,
+                &self.global_explorer.expanded_dirs,
+                &self.global_explorer.search_query,
+                self.global_explorer.filter_md,
+                self.global_explorer.sort_by_mtime,
+                &favorites,
+            );
+        } else if self.mode == Mode::GlobalExplorer {
+            self.mode = Mode::Terminal;
         }
     }
 }
@@ -1482,6 +1467,7 @@ impl AppState {
             active: None,
             selected: 0,
             mode: Mode::Navigate,
+            global_explorer: GlobalExplorerState::default(),
             should_quit: false,
             quit_detaches: false,
             detach_requested: false,
@@ -1506,6 +1492,7 @@ impl AppState {
             tab_scroll_follow_active: true,
             mobile_switcher_scroll: 0,
             view: ViewState {
+                global_explorer_rect: ratatui::layout::Rect::default(),
                 layout: ViewLayout::Desktop,
                 sidebar_rect: Rect::default(),
                 workspace_card_areas: Vec::new(),

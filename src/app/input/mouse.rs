@@ -130,6 +130,10 @@ impl AppState {
             return None;
         }
 
+        if self.mode == Mode::GlobalExplorer && self.handle_global_explorer_mouse(mouse) {
+            return None;
+        }
+
         let sidebar = self.view.sidebar_rect;
         let in_sidebar = mouse.column >= sidebar.x
             && mouse.column < sidebar.x + sidebar.width
@@ -1054,8 +1058,7 @@ impl AppState {
             if let Some(pane_state) = ws.pane_state(info.id) {
                 let is_custom = matches!(
                     pane_state.mode,
-                    crate::pane::state::PaneMode::FileExplorer { .. }
-                        | crate::pane::state::PaneMode::MarkdownViewer { .. }
+                    crate::pane::state::PaneMode::MarkdownViewer { .. }
                 );
                 if is_custom {
                     let pane_inner_w = if ws.layout.pane_count() > 1 {
@@ -1089,7 +1092,7 @@ impl AppState {
     pub(super) fn handle_custom_mode_mouse(
         &mut self,
         pane_id: crate::layout::PaneId,
-        widget_rect: Rect,
+        _widget_rect: Rect,
         mouse: MouseEvent,
     ) {
         self.focus_pane(pane_id);
@@ -1107,95 +1110,14 @@ impl AppState {
             return;
         };
 
-        match &mut pane.mode {
-            crate::pane::state::PaneMode::FileExplorer {
-                cwd,
-                selected_index,
-                files,
-                scroll,
-                search_query,
-                search_mode: _,
-                is_tree_view,
-                expanded_dirs,
-                filter_md,
-                sort_by_mtime,
-            } => {
-                let visible_height = (widget_rect.height as usize).saturating_sub(5).max(1);
-
-                match mouse.kind {
-                    MouseEventKind::ScrollUp => {
-                        if !files.is_empty() {
-                            *selected_index = selected_index.saturating_sub(1);
-                            if *selected_index < *scroll {
-                                *scroll = *selected_index;
-                            }
-                        }
-                    }
-                    MouseEventKind::ScrollDown => {
-                        if !files.is_empty() {
-                            *selected_index = (*selected_index + 1).min(files.len() - 1);
-                            if *selected_index >= *scroll + visible_height {
-                                *scroll = *selected_index + 1 - visible_height;
-                            }
-                        }
-                    }
-                    MouseEventKind::Down(MouseButton::Left) => {
-                        let list_start_y = widget_rect.y + 3;
-                        if mouse.row >= list_start_y
-                            && mouse.row < list_start_y + widget_rect.height.saturating_sub(5)
-                        {
-                            let click_offset = (mouse.row - list_start_y) as usize;
-                            let clicked_idx = *scroll + click_offset;
-                            if clicked_idx < files.len() {
-                                if *selected_index == clicked_idx {
-                                    if let Some(entry) = files.get(clicked_idx) {
-                                        if entry.is_dir {
-                                            let path = entry.path.clone();
-                                            if expanded_dirs.contains(&path) {
-                                                expanded_dirs.remove(&path);
-                                            } else {
-                                                expanded_dirs.insert(path);
-                                            }
-                                            let favorites = crate::config::load_favorites(cwd);
-                                            *files = crate::app::state::build_explorer_entries(
-                                                cwd,
-                                                *is_tree_view,
-                                                expanded_dirs,
-                                                search_query,
-                                                *filter_md,
-                                                *sort_by_mtime,
-                                                &favorites,
-                                            );
-                                        } else {
-                                            let path = entry.path.clone();
-                                            if let Ok(content) = std::fs::read_to_string(&path) {
-                                                let lines =
-                                                    content.lines().map(String::from).collect();
-                                                pane.mode =
-                                                    crate::pane::state::PaneMode::MarkdownViewer {
-                                                        path,
-                                                        content,
-                                                        scroll: 0,
-                                                        lines,
-                                                    };
-                                            }
-                                        }
-                                    }
-                                } else {
-                                    *selected_index = clicked_idx;
-                                }
-                            }
-                        }
-                    }
-                    _ => {}
-                }
-            }
-            crate::pane::state::PaneMode::MarkdownViewer {
-                path: _,
-                content: _,
-                scroll,
-                lines,
-            } => match mouse.kind {
+        if let crate::pane::state::PaneMode::MarkdownViewer {
+            path: _,
+            content: _,
+            scroll,
+            lines,
+        } = &mut pane.mode
+        {
+            match mouse.kind {
                 MouseEventKind::ScrollUp => {
                     *scroll = scroll.saturating_sub(3);
                 }
@@ -1205,8 +1127,7 @@ impl AppState {
                     }
                 }
                 _ => {}
-            },
-            _ => {}
+            }
         }
     }
 

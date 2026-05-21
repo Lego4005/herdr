@@ -146,9 +146,13 @@ impl Workspace {
         render_dirty: Arc<AtomicBool>,
         argv: Option<&[String]>,
     ) -> std::io::Result<(Self, TerminalState, TerminalRuntime)> {
+        let workspace_id = generate_workspace_id();
+        let session_id = crate::session::active_name().unwrap_or_else(|| "default".to_string());
         let (tab, terminal, runtime) = if let Some(argv) = argv {
             Tab::new_argv_command(
                 1,
+                workspace_id.clone(),
+                session_id.clone(),
                 initial_cwd.clone(),
                 rows,
                 cols,
@@ -162,6 +166,8 @@ impl Workspace {
         } else {
             Tab::new(
                 1,
+                workspace_id.clone(),
+                session_id.clone(),
                 initial_cwd.clone(),
                 rows,
                 cols,
@@ -177,7 +183,7 @@ impl Workspace {
         public_pane_numbers.insert(tab.root_pane, 1);
         Ok((
             Self {
-                id: generate_workspace_id(),
+                id: workspace_id,
                 custom_name: None,
                 identity_cwd: initial_cwd.clone(),
                 cached_git_branch: git_branch(&initial_cwd),
@@ -265,31 +271,36 @@ impl Workspace {
             .map(|tab| tab.render_dirty.clone())
             .expect("workspace must always have at least one tab");
 
+        let session_id = crate::session::active_name().unwrap_or_else(|| "default".to_string());
         let (tab, terminal, runtime) = if let Some(argv) = argv {
             Tab::new_argv_command(
                 number,
+                self.id.clone(),
+                session_id.clone(),
                 cwd,
                 rows,
                 cols,
                 argv,
                 scrollback_limit_bytes,
                 host_terminal_theme,
-                events,
-                render_notify,
-                render_dirty,
+                events.clone(),
+                render_notify.clone(),
+                render_dirty.clone(),
             )?
         } else {
             Tab::new(
                 number,
+                self.id.clone(),
+                session_id.clone(),
                 cwd,
                 rows,
                 cols,
                 scrollback_limit_bytes,
                 host_terminal_theme,
                 default_shell,
-                events,
-                render_notify,
-                render_dirty,
+                events.clone(),
+                render_notify.clone(),
+                render_dirty.clone(),
             )?
         };
         self.register_new_pane(tab.root_pane);
@@ -354,10 +365,12 @@ impl Workspace {
         host_terminal_theme: crate::terminal_theme::TerminalTheme,
         default_shell: &str,
     ) -> std::io::Result<crate::workspace::tab::NewPane> {
+        let session_id = crate::session::active_name().unwrap_or_else(|| "default".to_string());
         let new_pane = self
             .active_tab_mut()
             .expect("workspace must always have at least one tab")
             .split_focused(
+                &session_id,
                 direction,
                 rows,
                 cols,
@@ -441,8 +454,10 @@ impl Workspace {
         let tab = &mut self.tabs[tab_idx];
         let previous_focus = tab.layout.focused();
         tab.layout.focus_pane(pane_id);
+        let session_id = crate::session::active_name().unwrap_or_else(|| "default".to_string());
         let new_pane = match if let Some(argv) = argv {
             tab.split_focused_argv_command(
+                &session_id,
                 direction,
                 rows,
                 cols,
@@ -453,6 +468,7 @@ impl Workspace {
             )
         } else {
             tab.split_focused(
+                &session_id,
                 direction,
                 rows,
                 cols,
@@ -690,7 +706,9 @@ impl Workspace {
         let terminal_id = TerminalId::alloc();
         let mut panes = HashMap::new();
         panes.insert(root_id, PaneState::new(terminal_id));
+        let workspace_id = generate_workspace_id();
         let tab = Tab {
+            workspace_id: workspace_id.clone(),
             custom_name: None,
             number: 1,
             root_pane: root_id,
@@ -705,7 +723,7 @@ impl Workspace {
         let mut public_pane_numbers = HashMap::new();
         public_pane_numbers.insert(tab.root_pane, 1);
         Self {
-            id: generate_workspace_id(),
+            id: workspace_id,
             custom_name: Some(name.to_string()),
             identity_cwd: identity_cwd.clone(),
             cached_git_branch: git_branch(&identity_cwd),
@@ -739,6 +757,7 @@ impl Workspace {
         let mut panes = HashMap::new();
         panes.insert(root_id, PaneState::new(TerminalId::alloc()));
         let tab = Tab {
+            workspace_id: self.id.clone(),
             custom_name: name.map(str::to_string),
             number: self.tabs.len() + 1,
             root_pane: root_id,

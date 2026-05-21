@@ -333,6 +333,7 @@ impl App {
         let mut state = AppState {
             terminals: std::collections::HashMap::new(),
             terminal_runtimes: std::collections::HashMap::new(),
+            global_explorer: crate::app::state::GlobalExplorerState::default(),
             direct_attach_resize_locks: std::collections::HashSet::new(),
             workspaces,
             active,
@@ -380,7 +381,8 @@ impl App {
                 tab_scroll_right_hit_area: Rect::default(),
                 new_tab_hit_area: Rect::default(),
                 terminal_area: Rect::default(),
-                mobile_header_rect: Rect::default(),
+                mobile_header_rect: ratatui::layout::Rect::default(),
+                global_explorer_rect: ratatui::layout::Rect::default(),
                 mobile_menu_hit_area: Rect::default(),
                 toast_hit_area: Rect::default(),
                 pane_infos: Vec::new(),
@@ -1087,8 +1089,8 @@ impl App {
             Mode::Settings => {
                 self.handle_settings_key(key_event);
             }
-            Mode::Terminal => {
-                // Should not be called in terminal mode.
+            Mode::Terminal | Mode::GlobalExplorer => {
+                // Should not be called in terminal or global explorer modes.
             }
         }
         self.sync_toast_deadline(previous_toast);

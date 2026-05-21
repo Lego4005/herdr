@@ -194,6 +194,15 @@ fn compute_view_internal(
         .unwrap_or_default();
     app.tab_scroll = tab_bar_view.scroll;
 
+    let (terminal_area, global_explorer_rect) = if app.global_explorer.open {
+        let explorer_w = 40.min(terminal_area.width);
+        let [term, exp] = Layout::horizontal([Constraint::Min(1), Constraint::Length(explorer_w)])
+            .areas(terminal_area);
+        (term, exp)
+    } else {
+        (terminal_area, Rect::default())
+    };
+
     let split_borders = app
         .active
         .and_then(|i| app.workspaces.get(i))
@@ -214,6 +223,7 @@ fn compute_view_internal(
     app.view = crate::app::ViewState {
         layout: ViewLayout::Desktop,
         sidebar_rect: sidebar_area,
+        global_explorer_rect,
         workspace_card_areas,
         tab_bar_rect,
         tab_hit_areas: tab_bar_view.tab_hit_areas,
@@ -271,6 +281,7 @@ fn compute_mobile_view(
     app.view = crate::app::ViewState {
         layout: ViewLayout::Mobile,
         sidebar_rect: Rect::default(),
+        global_explorer_rect: Rect::default(),
         workspace_card_areas: Vec::new(),
         tab_bar_rect: Rect::default(),
         tab_hit_areas: Vec::new(),
@@ -304,6 +315,23 @@ pub fn render(app: &AppState, frame: &mut Frame) {
     }
     render_panes(app, frame, terminal_area);
 
+    if app.global_explorer.open && app.view.global_explorer_rect.width > 0 {
+        crate::ui::explorer_widgets::render_explorer(
+            app,
+            frame,
+            app.view.global_explorer_rect,
+            &app.global_explorer.cwd,
+            &app.global_explorer.files,
+            app.global_explorer.selected_index,
+            app.global_explorer.scroll,
+            &app.global_explorer.search_query,
+            app.global_explorer.search_mode,
+            app.global_explorer.is_tree_view,
+            app.global_explorer.filter_md,
+            app.global_explorer.sort_by_mtime,
+        );
+    }
+
     match app.mode {
         Mode::Onboarding => render_onboarding_overlay(app, frame, frame.area()),
         Mode::ReleaseNotes => render_release_notes_overlay(app, frame, frame.area()),
@@ -324,7 +352,7 @@ pub fn render(app: &AppState, frame: &mut Frame) {
         }
         Mode::GlobalMenu => render_global_launcher_menu(app, frame),
         Mode::KeybindHelp => render_keybind_help_overlay(app, frame),
-        Mode::Terminal => {}
+        Mode::Terminal | Mode::GlobalExplorer => {}
     }
 
     // Notifications (rendered on top of everything)

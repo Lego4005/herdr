@@ -301,7 +301,9 @@ impl App {
                 &self.state.terminal_runtimes,
             )
         });
+        let session_id = crate::session::active_name().unwrap_or_else(|| "default".to_string());
         let new_pane = ws.split_focused_command(
+            &session_id,
             Direction::Horizontal,
             new_rows,
             new_cols,
@@ -748,7 +750,6 @@ pub(super) fn execute_navigate_action_in_context(
         }
         NavigateAction::ToggleExplorer => {
             state.toggle_explorer_on_focused_pane();
-            leave_navigate_mode(state);
         }
     }
 

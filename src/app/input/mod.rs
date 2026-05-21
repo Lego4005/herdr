@@ -22,6 +22,7 @@ enum WheelRouting {
 const WORKSPACE_DRAG_THRESHOLD: u16 = 1;
 const TAB_DRAG_THRESHOLD: u16 = 1;
 
+mod explorer;
 mod modal;
 mod mouse;
 mod navigate;
@@ -76,6 +77,7 @@ impl App {
                     Mode::Settings => self.handle_settings_key(key_event),
                     Mode::GlobalMenu => handle_global_menu_key(&mut self.state, key_event),
                     Mode::KeybindHelp => handle_keybind_help_key(&mut self.state, key_event),
+                    Mode::GlobalExplorer => self.handle_global_explorer_key(key),
                     Mode::Terminal => unreachable!(),
                 }
             }

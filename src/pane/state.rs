@@ -13,18 +13,7 @@ pub struct FileEntry {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PaneMode {
     Terminal,
-    FileExplorer {
-        cwd: std::path::PathBuf,
-        selected_index: usize,
-        files: Vec<FileEntry>,
-        scroll: usize,
-        search_query: String,
-        search_mode: bool,
-        is_tree_view: bool,
-        expanded_dirs: std::collections::HashSet<std::path::PathBuf>,
-        filter_md: bool,
-        sort_by_mtime: bool,
-    },
+
     MarkdownViewer {
         path: std::path::PathBuf,
         content: String,

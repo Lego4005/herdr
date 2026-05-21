@@ -276,7 +276,11 @@ impl PaneRuntime {
         self.terminal.apply_host_terminal_theme(theme);
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn spawn(
+        workspace_id: &str,
+        tab_id: &str,
+        session_id: &str,
         pane_id: PaneId,
         rows: u16,
         cols: u16,
@@ -293,7 +297,7 @@ impl PaneRuntime {
         cmd.cwd(cwd);
         cmd.env(crate::HERDR_ENV_VAR, crate::HERDR_ENV_VALUE);
         apply_pane_terminal_env(&mut cmd);
-        crate::integration::apply_pane_env(&mut cmd, pane_id);
+        crate::integration::apply_pane_env(&mut cmd, workspace_id, tab_id, pane_id, session_id);
         Self::spawn_command_builder(
             pane_id,
             rows,
@@ -308,7 +312,11 @@ impl PaneRuntime {
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn spawn_shell_command(
+        workspace_id: &str,
+        tab_id: &str,
+        session_id: &str,
         pane_id: PaneId,
         rows: u16,
         cols: u16,
@@ -327,7 +335,7 @@ impl PaneRuntime {
         cmd.cwd(cwd);
         cmd.env(crate::HERDR_ENV_VAR, crate::HERDR_ENV_VALUE);
         apply_pane_terminal_env(&mut cmd);
-        crate::integration::apply_pane_env(&mut cmd, pane_id);
+        crate::integration::apply_pane_env(&mut cmd, workspace_id, tab_id, pane_id, session_id);
         for (key, value) in extra_env {
             cmd.env(key, value);
         }
@@ -345,7 +353,11 @@ impl PaneRuntime {
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn spawn_argv_command(
+        workspace_id: &str,
+        tab_id: &str,
+        session_id: &str,
         pane_id: PaneId,
         rows: u16,
         cols: u16,
@@ -370,7 +382,7 @@ impl PaneRuntime {
         cmd.cwd(cwd);
         cmd.env(crate::HERDR_ENV_VAR, crate::HERDR_ENV_VALUE);
         apply_pane_terminal_env(&mut cmd);
-        crate::integration::apply_pane_env(&mut cmd, pane_id);
+        crate::integration::apply_pane_env(&mut cmd, workspace_id, tab_id, pane_id, session_id);
         Self::spawn_command_builder(
             pane_id,
             rows,

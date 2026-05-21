@@ -58,9 +58,20 @@ pub struct ApiRequestMessage {
 
 pub type ApiRequestSender = mpsc::UnboundedSender<ApiRequestMessage>;
 
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct EventHub {
     inner: std::sync::Arc<std::sync::Mutex<EventHubState>>,
+    pub(crate) tx: tokio::sync::broadcast::Sender<crate::api::schema::EventEnvelope>,
+}
+
+impl Default for EventHub {
+    fn default() -> Self {
+        let (tx, _) = tokio::sync::broadcast::channel(1024);
+        Self {
+            inner: Default::default(),
+            tx,
+        }
+    }
 }
 
 #[derive(Default)]
@@ -78,11 +89,13 @@ impl EventHub {
         };
         state.next_sequence += 1;
         let sequence = state.next_sequence;
-        state.events.push((sequence, event));
+        state.events.push((sequence, event.clone()));
         let overflow = state.events.len().saturating_sub(Self::MAX_EVENTS);
         if overflow > 0 {
             state.events.drain(0..overflow);
         }
+        drop(state);
+        let _ = self.tx.send(event);
     }
 
     pub fn events_after(&self, sequence: u64) -> Vec<(u64, crate::api::schema::EventEnvelope)> {
@@ -589,6 +602,9 @@ fn stream_subscriptions(
         subscriptions.push(active);
     }
 
+    let only_events = subscriptions.iter().all(|s| s.is_event_only());
+    let mut rx = event_hub.tx.subscribe();
+
     if let Err(err) = write_json_line(
         &mut stream,
         &SuccessResponse {
@@ -617,7 +633,19 @@ fn stream_subscriptions(
                 }
             }
         }
-        std::thread::sleep(CONNECTION_POLL_INTERVAL);
+
+        if only_events {
+            // We successfully polled whatever was in the backlog. Now block until the next event.
+            // If we pushed_any, there might be more already so we could try_recv, but blocking_recv
+            // is fine because it returns immediately if there are buffered events in the broadcast channel.
+            match rx.blocking_recv() {
+                Ok(_) => {}
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => return Ok(()),
+            }
+        } else {
+            std::thread::sleep(CONNECTION_POLL_INTERVAL);
+        }
     }
 }
 
@@ -741,6 +769,10 @@ enum ActiveSubscription {
 }
 
 impl ActiveSubscription {
+    fn is_event_only(&self) -> bool {
+        matches!(self, Self::Event(_))
+    }
+
     fn new(
         subscription: Subscription,
         request_id: &str,
@@ -1337,6 +1369,7 @@ mod tests {
         let running = Arc::new(AtomicBool::new(true));
         let server_running = Arc::clone(&running);
         let event_hub = EventHub::default();
+        let eh_clone = event_hub.clone();
         let (done_tx, done_rx) = std::sync::mpsc::channel();
         let server_thread = std::thread::spawn(move || {
             let result = handle_connection(server, &api_tx, &event_hub, &server_running);
@@ -1348,6 +1381,12 @@ mod tests {
         assert_eq!(ack["result"]["type"], "subscription_started");
 
         drop(client);
+        eh_clone.push(crate::api::schema::EventEnvelope {
+            event: crate::api::schema::EventKind::WorkspaceFocused,
+            data: crate::api::schema::EventData::WorkspaceFocused {
+                workspace_id: "dummy".into(),
+            },
+        });
 
         let result = done_rx.recv_timeout(Duration::from_secs(2)).unwrap();
         assert!(result.is_ok());
@@ -1369,6 +1408,7 @@ mod tests {
         let running = Arc::new(AtomicBool::new(true));
         let server_running = Arc::clone(&running);
         let event_hub = EventHub::default();
+        let eh_clone = event_hub.clone();
         let (done_tx, done_rx) = std::sync::mpsc::channel();
         let server_thread = std::thread::spawn(move || {
             let result = handle_connection(server, &api_tx, &event_hub, &server_running);
@@ -1380,6 +1420,12 @@ mod tests {
         assert_eq!(ack["result"]["type"], "subscription_started");
 
         running.store(false, Ordering::Relaxed);
+        eh_clone.push(crate::api::schema::EventEnvelope {
+            event: crate::api::schema::EventKind::WorkspaceFocused,
+            data: crate::api::schema::EventData::WorkspaceFocused {
+                workspace_id: "dummy".into(),
+            },
+        });
 
         let result = done_rx.recv_timeout(Duration::from_secs(2)).unwrap();
         assert!(result.is_ok());

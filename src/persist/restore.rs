@@ -74,9 +74,17 @@ fn restore_workspace(
     let mut public_pane_numbers = HashMap::new();
     let mut next_public_pane_number = 1;
 
+    let workspace_id = snap
+        .id
+        .clone()
+        .unwrap_or_else(crate::workspace::generate_workspace_id);
+    let session_id = crate::session::active_name().unwrap_or_else(|| "default".to_string());
+
     for (idx, tab_snap) in snap.tabs.iter().enumerate() {
         let (tab, restored_terminals, restored_runtimes) = restore_tab(
             tab_snap,
+            workspace_id.clone(),
+            session_id.clone(),
             idx + 1,
             rows,
             cols,
@@ -101,10 +109,7 @@ fn restore_workspace(
 
     Some((
         Workspace {
-            id: snap
-                .id
-                .clone()
-                .unwrap_or_else(crate::workspace::generate_workspace_id),
+            id: workspace_id,
             custom_name: snap.custom_name.clone(),
             identity_cwd: snap.identity_cwd.clone(),
             cached_git_branch: None,
@@ -123,6 +128,8 @@ fn restore_workspace(
 
 fn restore_tab(
     snap: &TabSnapshot,
+    workspace_id: String,
+    session_id: String,
     number: usize,
     rows: u16,
     cols: u16,
@@ -179,7 +186,11 @@ fn restore_tab(
             .and_then(|old_id| snap.panes.get(old_id))
             .and_then(|p| p.agent_name.clone());
 
+        let tab_id = format!("{}:{}", workspace_id, number);
         match TerminalRuntime::spawn(
+            &workspace_id,
+            &tab_id,
+            &session_id,
             *id,
             rows,
             cols,
@@ -240,6 +251,7 @@ fn restore_tab(
         crate::workspace::Tab {
             custom_name: snap.custom_name.clone(),
             number,
+            workspace_id,
             root_pane,
             layout,
             panes,

@@ -32,6 +32,7 @@ enum SplitCommand<'a> {
 pub struct Tab {
     pub custom_name: Option<String>,
     pub number: usize,
+    pub workspace_id: String,
     /// Identity source for this tab's pane tree.
     pub root_pane: PaneId,
     pub layout: TileLayout,
@@ -46,8 +47,11 @@ pub struct Tab {
 }
 
 impl Tab {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         number: usize,
+        workspace_id: String,
+        session_id: String,
         initial_cwd: PathBuf,
         rows: u16,
         cols: u16,
@@ -60,6 +64,8 @@ impl Tab {
     ) -> std::io::Result<(Self, TerminalState, TerminalRuntime)> {
         Self::new_with_runtime(
             number,
+            workspace_id,
+            session_id,
             initial_cwd,
             rows,
             cols,
@@ -73,8 +79,11 @@ impl Tab {
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn new_argv_command(
         number: usize,
+        workspace_id: String,
+        session_id: String,
         initial_cwd: PathBuf,
         rows: u16,
         cols: u16,
@@ -87,6 +96,8 @@ impl Tab {
     ) -> std::io::Result<(Self, TerminalState, TerminalRuntime)> {
         Self::new_with_runtime(
             number,
+            workspace_id,
+            session_id,
             initial_cwd,
             rows,
             cols,
@@ -103,6 +114,8 @@ impl Tab {
     #[allow(clippy::too_many_arguments)]
     fn new_with_runtime(
         number: usize,
+        workspace_id: String,
+        session_id: String,
         initial_cwd: PathBuf,
         rows: u16,
         cols: u16,
@@ -115,8 +128,12 @@ impl Tab {
         argv: Option<&[String]>,
     ) -> std::io::Result<(Self, TerminalState, TerminalRuntime)> {
         let (layout, root_id) = TileLayout::new();
+        let tab_id = format!("{}:{}", workspace_id, number);
         let runtime = if let Some(argv) = argv {
             TerminalRuntime::spawn_argv_command(
+                &workspace_id,
+                &tab_id,
+                &session_id,
                 root_id,
                 rows,
                 cols,
@@ -130,6 +147,9 @@ impl Tab {
             )?
         } else {
             TerminalRuntime::spawn(
+                &workspace_id,
+                &tab_id,
+                &session_id,
                 root_id,
                 rows,
                 cols,
@@ -157,6 +177,7 @@ impl Tab {
             Self {
                 custom_name: None,
                 number,
+                workspace_id,
                 root_pane: root_id,
                 layout,
                 panes,
@@ -188,6 +209,7 @@ impl Tab {
 
     pub fn split_focused(
         &mut self,
+        session_id: &str,
         direction: Direction,
         rows: u16,
         cols: u16,
@@ -197,6 +219,7 @@ impl Tab {
         default_shell: &str,
     ) -> std::io::Result<NewPane> {
         self.split_focused_with_runtime(
+            session_id,
             direction,
             rows,
             cols,
@@ -210,6 +233,7 @@ impl Tab {
 
     pub fn split_focused_command(
         &mut self,
+        session_id: &str,
         direction: Direction,
         rows: u16,
         cols: u16,
@@ -220,6 +244,7 @@ impl Tab {
         host_terminal_theme: crate::terminal_theme::TerminalTheme,
     ) -> std::io::Result<NewPane> {
         self.split_focused_with_runtime(
+            session_id,
             direction,
             rows,
             cols,
@@ -233,6 +258,7 @@ impl Tab {
 
     pub fn split_focused_argv_command(
         &mut self,
+        session_id: &str,
         direction: Direction,
         rows: u16,
         cols: u16,
@@ -242,6 +268,7 @@ impl Tab {
         host_terminal_theme: crate::terminal_theme::TerminalTheme,
     ) -> std::io::Result<NewPane> {
         self.split_focused_with_runtime(
+            session_id,
             direction,
             rows,
             cols,
@@ -255,6 +282,7 @@ impl Tab {
 
     fn split_focused_with_runtime(
         &mut self,
+        session_id: &str,
         direction: Direction,
         rows: u16,
         cols: u16,
@@ -266,6 +294,7 @@ impl Tab {
     ) -> std::io::Result<NewPane> {
         let previous_focus = self.layout.focused();
         let new_id = self.layout.split_focused(direction);
+        let tab_id = format!("{}:{}", self.workspace_id, self.number);
         let actual_cwd =
             cwd.unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| "/".into()));
         let launch_argv = if let Some(SplitCommand::Argv { argv }) = &command {
@@ -276,6 +305,9 @@ impl Tab {
         let runtime = match command {
             Some(SplitCommand::Shell { command, extra_env }) => {
                 TerminalRuntime::spawn_shell_command(
+                    &self.workspace_id,
+                    &tab_id,
+                    session_id,
                     new_id,
                     rows,
                     cols,
@@ -290,6 +322,9 @@ impl Tab {
                 )
             }
             Some(SplitCommand::Argv { argv }) => TerminalRuntime::spawn_argv_command(
+                &self.workspace_id,
+                &tab_id,
+                session_id,
                 new_id,
                 rows,
                 cols,
@@ -302,6 +337,9 @@ impl Tab {
                 self.render_dirty.clone(),
             ),
             None => TerminalRuntime::spawn(
+                &self.workspace_id,
+                &tab_id,
+                session_id,
                 new_id,
                 rows,
                 cols,
