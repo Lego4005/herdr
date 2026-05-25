@@ -128,9 +128,42 @@ impl App {
             .unwrap_or_else(|| PathBuf::from("/"));
         let argv = params.argv;
         let focus = params.focus;
+        let split = params.split.unwrap_or(SplitDirection::Right);
         let (rows, cols) = self.state.estimate_pane_size();
 
-        let (ws_idx, tab_idx, pane_id) = if let Some(tab_id) = params.tab_id {
+        let (ws_idx, tab_idx, pane_id) = if let Some(target_pane_id) = params.target_pane_id {
+            let (ws_idx, target_pane) = self.parse_pane_id(&target_pane_id).ok_or_else(|| {
+                AgentStartError::TargetNotFound {
+                    target: target_pane_id.clone(),
+                }
+            })?;
+            let tab_idx = self.state.workspaces[ws_idx]
+                .find_tab_index_for_pane(target_pane)
+                .ok_or_else(|| AgentStartError::TargetNotFound {
+                    target: target_pane_id.clone(),
+                })?;
+            if let Some(workspace_id) = params.workspace_id.as_deref() {
+                let requested_ws_idx = self.parse_workspace_id(workspace_id).ok_or_else(|| {
+                    AgentStartError::TargetNotFound {
+                        target: workspace_id.to_string(),
+                    }
+                })?;
+                if requested_ws_idx != ws_idx {
+                    return Err(AgentStartError::PlacementConflict);
+                }
+            }
+            if let Some(tab_id) = params.tab_id.as_deref() {
+                let (requested_ws_idx, requested_tab_idx) =
+                    self.parse_tab_id(tab_id)
+                        .ok_or_else(|| AgentStartError::TargetNotFound {
+                            target: tab_id.to_string(),
+                        })?;
+                if requested_ws_idx != ws_idx || requested_tab_idx != tab_idx {
+                    return Err(AgentStartError::PlacementConflict);
+                }
+            }
+            self.spawn_agent_split(ws_idx, target_pane, split, cwd, &argv, focus)?
+        } else if let Some(tab_id) = params.tab_id {
             let (ws_idx, tab_idx) =
                 self.parse_tab_id(&tab_id)
                     .ok_or_else(|| AgentStartError::TargetNotFound {
@@ -147,14 +180,7 @@ impl App {
                 }
             }
             let target_pane = self.state.workspaces[ws_idx].tabs[tab_idx].layout.focused();
-            self.spawn_agent_split(
-                ws_idx,
-                target_pane,
-                params.split.unwrap_or(SplitDirection::Right),
-                cwd,
-                &argv,
-                focus,
-            )?
+            self.spawn_agent_split(ws_idx, target_pane, split, cwd, &argv, focus)?
         } else if let Some(workspace_id) = params.workspace_id {
             let ws_idx = self.parse_workspace_id(&workspace_id).ok_or_else(|| {
                 AgentStartError::TargetNotFound {
@@ -163,28 +189,14 @@ impl App {
             })?;
             let tab_idx = self.state.workspaces[ws_idx].active_tab;
             let target_pane = self.state.workspaces[ws_idx].tabs[tab_idx].layout.focused();
-            self.spawn_agent_split(
-                ws_idx,
-                target_pane,
-                params.split.unwrap_or(SplitDirection::Right),
-                cwd,
-                &argv,
-                focus,
-            )?
+            self.spawn_agent_split(ws_idx, target_pane, split, cwd, &argv, focus)?
         } else if self.state.workspaces.is_empty() {
             self.spawn_agent_workspace(cwd, rows, cols, &argv, focus)?
         } else {
             let ws_idx = self.state.active.unwrap_or(0);
             let tab_idx = self.state.workspaces[ws_idx].active_tab;
             let target_pane = self.state.workspaces[ws_idx].tabs[tab_idx].layout.focused();
-            self.spawn_agent_split(
-                ws_idx,
-                target_pane,
-                params.split.unwrap_or(SplitDirection::Right),
-                cwd,
-                &argv,
-                focus,
-            )?
+            self.spawn_agent_split(ws_idx, target_pane, split, cwd, &argv, focus)?
         };
 
         let terminal_id = self

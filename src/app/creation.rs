@@ -265,6 +265,7 @@ impl App {
             terminal_id: terminal.id.to_string(),
             workspace_id: self.public_workspace_id(ws_idx),
             tab_id: self.public_tab_id(ws_idx, tab_idx)?,
+            is_root_pane: ws.tabs[tab_idx].root_pane == pane_id,
             focused,
             cwd: ws.tabs[tab_idx]
                 .cwd_for_pane(
@@ -277,6 +278,7 @@ impl App {
             agent: terminal.effective_agent_label().map(str::to_string),
             agent_status: pane_agent_status(terminal.state, pane.seen),
             custom_status: terminal.effective_custom_status().map(str::to_string),
+            wave_contract: terminal.wave_contract.clone(),
             revision: terminal.revision,
         })
     }

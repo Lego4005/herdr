@@ -302,9 +302,9 @@ pub(super) fn render_panes(app: &AppState, frame: &mut Frame, area: Rect) {
                     .pane_state(info.id)
                     .and_then(|pane| app.terminals.get(&pane.attached_terminal_id))
                     .and_then(|terminal| {
-                        terminal.border_label(app.show_agent_labels_on_pane_borders)
+                        terminal.pane_border_label(app.show_agent_labels_on_pane_borders)
                     })
-                    .and_then(|label| pane_border_title(label, info.rect.width))
+                    .and_then(|label| pane_border_title(&label, info.rect.width))
                 {
                     block = block.title(Line::from(Span::styled(title, border_style)));
                 }

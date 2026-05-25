@@ -85,17 +85,6 @@ fn wait_for_socket(path: &Path, timeout: Duration) {
     panic!("socket did not appear at {}", path.display());
 }
 
-fn wait_for_file(path: &Path, timeout: Duration) {
-    let deadline = Instant::now() + timeout;
-    while Instant::now() < deadline {
-        if path.exists() {
-            return;
-        }
-        thread::sleep(Duration::from_millis(25));
-    }
-    panic!("file did not appear at {}", path.display());
-}
-
 fn spawn_server(
     config_home: &Path,
     runtime_dir: &Path,
@@ -367,7 +356,7 @@ fn server_creates_both_sockets() {
 
     // Wait for both sockets to appear.
     wait_for_socket(&api_socket, Duration::from_secs(10));
-    wait_for_file(&client_socket, Duration::from_secs(10));
+    wait_for_socket(&client_socket, Duration::from_secs(10));
 
     // Verify the client socket is a socket file.
     let metadata = fs::metadata(&client_socket).unwrap();
@@ -443,7 +432,7 @@ fn server_removes_client_socket_on_exit() {
 
     let mut spawned = spawn_server(&config_home, &runtime_dir, &api_socket, &client_socket);
     wait_for_socket(&api_socket, Duration::from_secs(10));
-    wait_for_file(&client_socket, Duration::from_secs(10));
+    wait_for_socket(&client_socket, Duration::from_secs(10));
 
     // Kill the server.
     let _ = spawned.child.kill();
@@ -508,7 +497,7 @@ fn server_persists_after_client_disconnect() {
 
     let spawned = spawn_server(&config_home, &runtime_dir, &api_socket, &client_socket);
     wait_for_socket(&api_socket, Duration::from_secs(10));
-    wait_for_file(&client_socket, Duration::from_secs(10));
+    wait_for_socket(&client_socket, Duration::from_secs(10));
 
     // Connect to the client socket and then immediately disconnect.
     {
@@ -587,7 +576,7 @@ fn client_handshake_succeeds() {
 
     let spawned = spawn_server(&config_home, &runtime_dir, &api_socket, &client_socket);
     wait_for_socket(&api_socket, Duration::from_secs(10));
-    wait_for_file(&client_socket, Duration::from_secs(10));
+    wait_for_socket(&client_socket, Duration::from_secs(10));
 
     // Connect to the client socket and perform a handshake.
     let mut stream = UnixStream::connect(&client_socket).expect("should connect to client socket");
@@ -617,7 +606,7 @@ fn client_handshake_rejects_incompatible_version() {
 
     let spawned = spawn_server(&config_home, &runtime_dir, &api_socket, &client_socket);
     wait_for_socket(&api_socket, Duration::from_secs(10));
-    wait_for_file(&client_socket, Duration::from_secs(10));
+    wait_for_socket(&client_socket, Duration::from_secs(10));
 
     // Connect to the client socket and send Hello with version 0 (pre-persistence).
     let mut stream = UnixStream::connect(&client_socket).expect("should connect to client socket");
@@ -645,7 +634,7 @@ fn client_handshake_clamps_small_terminal_size() {
 
     let spawned = spawn_server(&config_home, &runtime_dir, &api_socket, &client_socket);
     wait_for_socket(&api_socket, Duration::from_secs(10));
-    wait_for_file(&client_socket, Duration::from_secs(10));
+    wait_for_socket(&client_socket, Duration::from_secs(10));
 
     // Send Hello with 0x0 terminal size — should be clamped.
     let mut stream = UnixStream::connect(&client_socket).expect("should connect to client socket");
@@ -677,7 +666,7 @@ fn no_hello_client_closed_within_five_seconds() {
 
     let spawned = spawn_server(&config_home, &runtime_dir, &api_socket, &client_socket);
     wait_for_socket(&api_socket, Duration::from_secs(10));
-    wait_for_file(&client_socket, Duration::from_secs(10));
+    wait_for_socket(&client_socket, Duration::from_secs(10));
 
     // Connect but don't send Hello — just a raw connection.
     let mut stream = UnixStream::connect(&client_socket).expect("should connect to client socket");

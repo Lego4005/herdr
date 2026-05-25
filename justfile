@@ -29,6 +29,18 @@ install-hooks:
 build:
     cargo build --release --locked
 
+# Open the local desktop workroom app without requiring a globally installed herdr
+desktop:
+    cargo run --locked -- desktop
+
+# Run the local desktop workroom browser preview on a stable port
+desktop-web port="62662":
+    cargo run --locked -- desktop --web --port {{port}}
+
+# Smoke-test the rendered desktop workroom against a running preview server
+desktop-smoke:
+    HERDR_DESKTOP_URL="${HERDR_DESKTOP_URL:-http://127.0.0.1:62662/}" node scripts/desktop-workroom-smoke.mjs
+
 # Build the website and documentation
 website-build:
     cd website && bun install --frozen-lockfile && bun run build

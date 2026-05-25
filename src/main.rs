@@ -23,6 +23,7 @@ mod app;
 mod cli;
 mod client;
 mod config;
+mod desktop;
 mod detect;
 mod events;
 mod ghostty;
@@ -48,6 +49,7 @@ mod terminal_notify;
 mod terminal_theme;
 mod ui;
 mod update;
+mod wave;
 mod workspace;
 
 fn init_logging() {
@@ -370,6 +372,7 @@ fn main() -> io::Result<()> {
                 "herdr integration <subcommand>",
                 "Manage built-in agent integrations",
             ),
+            ("herdr desktop", "Open the experimental workroom shell"),
         ] {
             println!("  {command:<32} {description}");
         }
@@ -423,6 +426,7 @@ fn main() -> io::Result<()> {
             && ![
                 "server",
                 "client",
+                "desktop",
                 "remote-client-bridge",
                 "update",
                 "status",

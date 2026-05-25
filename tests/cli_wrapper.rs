@@ -566,6 +566,67 @@ fn pane_run_sends_one_send_input_request_with_enter_key() {
 }
 
 #[test]
+fn pane_set_wave_sends_contract_loaded_from_file() {
+    let base = unique_test_dir();
+    fs::create_dir_all(&base).unwrap();
+    let socket_path = base.join("herdr.sock");
+    let contract_path = base.join("wave.json");
+    fs::write(
+        &contract_path,
+        r#"{
+            "title": "Wave 1: proof docs",
+            "mode": "write",
+            "dependency": "parallel OK",
+            "report": {"completed_fields": 4, "required_fields": 10},
+            "blast_radius": "none"
+        }"#,
+    )
+    .unwrap();
+    let listener = UnixListener::bind(&socket_path).unwrap();
+
+    let server = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut line = String::new();
+        let mut reader = BufReader::new(stream.try_clone().unwrap());
+        reader.read_line(&mut line).unwrap();
+        stream
+            .write_all(br#"{"id":"cli:pane:set-wave","result":{"type":"ok"}}"#)
+            .unwrap();
+        stream.write_all(b"\n").unwrap();
+        stream.flush().unwrap();
+        line
+    });
+
+    let run = run_cli(
+        &socket_path,
+        &[
+            "pane",
+            "set-wave",
+            "1-1",
+            "--file",
+            contract_path.to_str().unwrap(),
+        ],
+    );
+    assert!(
+        run.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+
+    let request: serde_json::Value = serde_json::from_str(&server.join().unwrap()).unwrap();
+    assert_eq!(request["method"], "pane.set_wave_contract");
+    assert_eq!(request["params"]["pane_id"], "1-1");
+    assert_eq!(request["params"]["contract"]["title"], "Wave 1: proof docs");
+    assert_eq!(request["params"]["contract"]["mode"], "write");
+    assert_eq!(
+        request["params"]["contract"]["report"]["completed_fields"],
+        4
+    );
+
+    cleanup_test_base(&base);
+}
+
+#[test]
 fn help_commands_exit_successfully() {
     let help_cases: &[&[&str]] = &[
         &["-h"],

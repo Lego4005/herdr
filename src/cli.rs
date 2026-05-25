@@ -9,10 +9,10 @@ use crate::api::schema::{
     AgentReadParams, AgentRenameParams, AgentSendParams, AgentStartParams, AgentStatus,
     AgentTarget, EmptyParams, IntegrationTarget, Method, OutputMatch, PaneAgentState,
     PaneListParams, PaneReadParams, PaneRenameParams, PaneReportAgentParams, PaneSendInputParams,
-    PaneSendKeysParams, PaneSendTextParams, PaneSplitParams, PaneTarget, PaneWaitForOutputParams,
-    PingParams, ReadFormat, ReadSource, Request, SplitDirection, Subscription, TabCreateParams,
-    TabListParams, TabRenameParams, TabTarget, WorkspaceCreateParams, WorkspaceRenameParams,
-    WorkspaceTarget,
+    PaneSendKeysParams, PaneSendTextParams, PaneSetWaveContractParams, PaneSplitParams, PaneTarget,
+    PaneWaitForOutputParams, PingParams, ReadFormat, ReadSource, Request, SplitDirection,
+    Subscription, TabCreateParams, TabListParams, TabRenameParams, TabTarget,
+    WorkspaceCreateParams, WorkspaceRenameParams, WorkspaceTarget,
 };
 
 pub enum CommandOutcome {
@@ -42,6 +42,7 @@ pub fn maybe_run(args: &[String]) -> std::io::Result<CommandOutcome> {
         "wait" => run_wait_command(&args[2..])?,
         "integration" => run_integration_command(&args[2..])?,
         "session" => run_session_command(&args[2..])?,
+        "desktop" => crate::desktop::run_desktop_command(&args[2..])?,
         _ => return Ok(CommandOutcome::NotCli),
     };
 
@@ -434,6 +435,7 @@ fn run_pane_command(args: &[String]) -> std::io::Result<i32> {
         "get" => pane_get(&args[1..]),
         "read" => pane_read(&args[1..]),
         "rename" => pane_rename(&args[1..]),
+        "set-wave" => pane_set_wave(&args[1..]),
         "split" => pane_split(&args[1..]),
         "close" => pane_close(&args[1..]),
         "send-text" => pane_send_text(&args[1..]),
@@ -906,12 +908,12 @@ fn tab_close(args: &[String]) -> std::io::Result<i32> {
 
 fn agent_start(args: &[String]) -> std::io::Result<i32> {
     let Some(name) = args.first() else {
-        eprintln!("usage: herdr agent start <name> [--cwd PATH] [--workspace ID] [--tab ID] [--split right|down] [--focus|--no-focus] -- <argv...>");
+        eprintln!("usage: herdr agent start <name> [--cwd PATH] [--workspace ID] [--tab ID] [--pane ID] [--split right|down] [--focus|--no-focus] -- <argv...>");
         return Ok(2);
     };
 
     let Some(separator) = args.iter().position(|arg| arg == "--") else {
-        eprintln!("usage: herdr agent start <name> [--cwd PATH] [--workspace ID] [--tab ID] [--split right|down] [--focus|--no-focus] -- <argv...>");
+        eprintln!("usage: herdr agent start <name> [--cwd PATH] [--workspace ID] [--tab ID] [--pane ID] [--split right|down] [--focus|--no-focus] -- <argv...>");
         return Ok(2);
     };
     if separator == args.len() - 1 {
@@ -922,6 +924,7 @@ fn agent_start(args: &[String]) -> std::io::Result<i32> {
     let mut cwd = None;
     let mut workspace_id = None;
     let mut tab_id = None;
+    let mut target_pane_id = None;
     let mut split = None;
     let mut focus = false;
 
@@ -950,6 +953,14 @@ fn agent_start(args: &[String]) -> std::io::Result<i32> {
                     return Ok(2);
                 };
                 tab_id = Some(normalize_tab_id(value));
+                index += 2;
+            }
+            "--pane" => {
+                let Some(value) = args.get(index + 1).filter(|_| index + 1 < separator) else {
+                    eprintln!("missing value for --pane");
+                    return Ok(2);
+                };
+                target_pane_id = Some(value.clone());
                 index += 2;
             }
             "--split" => {
@@ -982,6 +993,7 @@ fn agent_start(args: &[String]) -> std::io::Result<i32> {
             cwd,
             workspace_id,
             tab_id,
+            target_pane_id,
             split,
             focus,
             argv: args[separator + 1..].to_vec(),
@@ -1360,6 +1372,82 @@ fn pane_rename(args: &[String]) -> std::io::Result<i32> {
             pane_id: normalize_pane_id(raw_pane_id),
             label,
         }),
+    })?)
+}
+
+fn pane_set_wave(args: &[String]) -> std::io::Result<i32> {
+    let Some(raw_pane_id) = args.first() else {
+        eprintln!(
+            "usage: herdr pane set-wave <pane_id|self> (--file PATH [--wave ID] | --session PATH --wave ID | --clear)"
+        );
+        return Ok(2);
+    };
+
+    let pane_id = match normalize_pane_or_self(raw_pane_id) {
+        Ok(pane_id) => pane_id,
+        Err(message) => {
+            eprintln!("{message}");
+            return Ok(2);
+        }
+    };
+    let mut file_path = None;
+    let mut wave_id = None;
+    let mut clear = false;
+
+    let mut index = 1;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--file" | "--session" => {
+                let Some(value) = args.get(index + 1) else {
+                    eprintln!("missing value for {}", args[index]);
+                    return Ok(2);
+                };
+                file_path = Some(value.clone());
+                index += 2;
+            }
+            "--wave" => {
+                let Some(value) = args.get(index + 1) else {
+                    eprintln!("missing value for --wave");
+                    return Ok(2);
+                };
+                wave_id = Some(value.clone());
+                index += 2;
+            }
+            "--clear" => {
+                clear = true;
+                index += 1;
+            }
+            other => {
+                eprintln!("unknown option: {other}");
+                return Ok(2);
+            }
+        }
+    }
+
+    let contract = if clear {
+        if file_path.is_some() || wave_id.is_some() {
+            eprintln!("--clear cannot be combined with --file, --session, or --wave");
+            return Ok(2);
+        }
+        None
+    } else {
+        let Some(file_path) = file_path else {
+            eprintln!("missing required --file PATH or --session PATH");
+            return Ok(2);
+        };
+        let text = std::fs::read_to_string(&file_path)?;
+        match crate::wave::parse_wave_contract_document(&text, wave_id.as_deref()) {
+            Ok(contract) => Some(contract),
+            Err(err) => {
+                eprintln!("{err}");
+                return Ok(2);
+            }
+        }
+    };
+
+    print_response(&send_request(&Request {
+        id: "cli:pane:set-wave".into(),
+        method: Method::PaneSetWaveContract(PaneSetWaveContractParams { pane_id, contract }),
     })?)
 }
 
@@ -2011,6 +2099,19 @@ fn normalize_pane_id(value: &str) -> String {
     value.to_string()
 }
 
+fn normalize_pane_or_self(value: &str) -> Result<String, String> {
+    if matches!(value, "self" | ".") {
+        std::env::var(crate::integration::HERDR_PANE_ID_ENV_VAR).map_err(|_| {
+            format!(
+                "{value} requires {} to be set",
+                crate::integration::HERDR_PANE_ID_ENV_VAR
+            )
+        })
+    } else {
+        Ok(normalize_pane_id(value))
+    }
+}
+
 fn parse_split_direction(value: &str) -> std::io::Result<SplitDirection> {
     match value {
         "right" => Ok(SplitDirection::Right),
@@ -2235,6 +2336,7 @@ fn print_pane_help() {
     eprintln!("  herdr pane list [--workspace <workspace_id>]");
     eprintln!("  herdr pane get <pane_id>");
     eprintln!("  herdr pane rename <pane_id> <label>|--clear");
+    eprintln!("  herdr pane set-wave <pane_id|self> (--file PATH [--wave ID] | --session PATH --wave ID | --clear)");
     eprintln!("  herdr pane read <pane_id> [--source visible|recent|recent-unwrapped] [--lines N] [--format text|ansi] [--ansi]");
     eprintln!(
         "  herdr pane split <pane_id> --direction right|down [--cwd PATH] [--focus] [--no-focus]"

@@ -406,7 +406,7 @@ impl App {
                         self.emit_event(crate::api::schema::EventEnvelope {
                             event: crate::api::schema::EventKind::PaneCreated,
                             data: crate::api::schema::EventData::PaneCreated {
-                                pane: root_pane.clone(),
+                                pane: Box::new(root_pane.clone()),
                             },
                         });
                         SuccessResponse {
@@ -693,7 +693,7 @@ impl App {
                         self.emit_event(crate::api::schema::EventEnvelope {
                             event: crate::api::schema::EventKind::PaneCreated,
                             data: crate::api::schema::EventData::PaneCreated {
-                                pane: root_pane.clone(),
+                                pane: Box::new(root_pane.clone()),
                             },
                         });
                         SuccessResponse {
@@ -1092,7 +1092,9 @@ impl App {
                 let pane = self.pane_info(ws_idx, new_pane.pane_id).unwrap();
                 self.emit_event(crate::api::schema::EventEnvelope {
                     event: crate::api::schema::EventKind::PaneCreated,
-                    data: crate::api::schema::EventData::PaneCreated { pane: pane.clone() },
+                    data: crate::api::schema::EventData::PaneCreated {
+                        pane: Box::new(pane.clone()),
+                    },
                 });
                 SuccessResponse {
                     id: request.id,
@@ -1183,6 +1185,90 @@ impl App {
                 }
                 self.state.mark_session_dirty();
                 let pane = self.pane_info(ws_idx, pane_id).unwrap();
+                SuccessResponse {
+                    id: request.id,
+                    result: ResponseResult::PaneInfo { pane },
+                }
+            }
+            Method::PaneSetWaveContract(params) => {
+                let Some((ws_idx, pane_id)) = self.parse_pane_id(&params.pane_id) else {
+                    return serde_json::to_string(&ErrorResponse {
+                        id: request.id,
+                        error: ErrorBody {
+                            code: "pane_not_found".into(),
+                            message: format!("pane {} not found", params.pane_id),
+                        },
+                    })
+                    .unwrap_or_else(|_| {
+                        r#"{"id":"","error":{"code":"internal_error","message":"failed to encode response"}}"#
+                            .to_string()
+                    });
+                };
+                let Some(terminal_id) = self
+                    .state
+                    .workspaces
+                    .get(ws_idx)
+                    .and_then(|ws| ws.terminal_id(pane_id))
+                    .cloned()
+                else {
+                    return serde_json::to_string(&ErrorResponse {
+                        id: request.id,
+                        error: ErrorBody {
+                            code: "pane_not_found".into(),
+                            message: format!("pane {} not found", params.pane_id),
+                        },
+                    })
+                    .unwrap_or_else(|_| {
+                        r#"{"id":"","error":{"code":"internal_error","message":"failed to encode response"}}"#
+                            .to_string()
+                    });
+                };
+                let Some(terminal) = self.state.terminals.get_mut(&terminal_id) else {
+                    return serde_json::to_string(&ErrorResponse {
+                        id: request.id,
+                        error: ErrorBody {
+                            code: "pane_not_found".into(),
+                            message: format!("pane {} not found", params.pane_id),
+                        },
+                    })
+                    .unwrap_or_else(|_| {
+                        r#"{"id":"","error":{"code":"internal_error","message":"failed to encode response"}}"#
+                            .to_string()
+                    });
+                };
+                match params.contract {
+                    Some(contract) => {
+                        let Some(contract) = contract.normalized() else {
+                            return serde_json::to_string(&ErrorResponse {
+                                id: request.id,
+                                error: ErrorBody {
+                                    code: "invalid_wave_contract".into(),
+                                    message: "wave contract title must not be empty".into(),
+                                },
+                            })
+                            .unwrap_or_else(|_| {
+                                r#"{"id":"","error":{"code":"internal_error","message":"failed to encode response"}}"#
+                                    .to_string()
+                            });
+                        };
+                        terminal.set_wave_contract(contract);
+                    }
+                    None => terminal.clear_wave_contract(),
+                }
+                self.state.mark_session_dirty();
+                let Some(pane) = self.pane_info(ws_idx, pane_id) else {
+                    return serde_json::to_string(&ErrorResponse {
+                        id: request.id,
+                        error: ErrorBody {
+                            code: "pane_not_found".into(),
+                            message: format!("pane {} not found", params.pane_id),
+                        },
+                    })
+                    .unwrap_or_else(|_| {
+                        r#"{"id":"","error":{"code":"internal_error","message":"failed to encode response"}}"#
+                            .to_string()
+                    });
+                };
                 SuccessResponse {
                     id: request.id,
                     result: ResponseResult::PaneInfo { pane },

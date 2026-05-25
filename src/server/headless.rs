@@ -14,7 +14,7 @@
 //! - Handles stale socket cleanup, explicit server stop, minimum terminal size,
 //!   and pane spawn failure during restore
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io;
 use std::os::unix::net::UnixListener;
@@ -351,8 +351,8 @@ pub struct HeadlessServer {
     next_client_id: u64,
     /// The client currently driving the shared pane runtime size and theme.
     foreground_client_id: Option<u64>,
-    /// Writable direct attach owner per terminal id string.
-    terminal_attach_owners: HashMap<String, u64>,
+    /// Direct attach observers per terminal id string.
+    terminal_attach_clients: HashMap<String, HashSet<u64>>,
     /// Monotonic activity counter used to pick the most recently active client.
     next_activity_stamp: u64,
     /// Shared pane runtime size derived from the foreground client,
@@ -398,7 +398,7 @@ impl HeadlessServer {
             clients: HashMap::new(),
             next_client_id: 1,
             foreground_client_id: None,
-            terminal_attach_owners: HashMap::new(),
+            terminal_attach_clients: HashMap::new(),
             next_activity_stamp: 1,
             effective_size: (MIN_COLS, MIN_ROWS),
             shutting_down: false,
@@ -675,12 +675,23 @@ impl HeadlessServer {
         if let Some(removed) = removed {
             crate::server::clipboard_image::remove_files(removed.staged_clipboard_files);
             if let ClientConnectionMode::TerminalAttach { terminal_id } = removed.mode {
-                self.terminal_attach_owners.remove(&terminal_id);
-                if let Some(terminal_id) = self.terminal_id_by_string(&terminal_id) {
-                    self.app
-                        .state
-                        .direct_attach_resize_locks
-                        .remove(&terminal_id);
+                let has_remaining_attaches =
+                    if let Some(clients) = self.terminal_attach_clients.get_mut(&terminal_id) {
+                        clients.remove(&client_id);
+                        !clients.is_empty()
+                    } else {
+                        false
+                    };
+                if !has_remaining_attaches {
+                    self.terminal_attach_clients.remove(&terminal_id);
+                }
+                if !has_remaining_attaches {
+                    if let Some(terminal_id) = self.terminal_id_by_string(&terminal_id) {
+                        self.app
+                            .state
+                            .direct_attach_resize_locks
+                            .remove(&terminal_id);
+                    }
                 }
             }
         }
@@ -1331,27 +1342,26 @@ impl HeadlessServer {
             return false;
         };
 
-        if let Some(existing_owner) = self.terminal_attach_owners.get(&terminal_id).copied() {
-            if existing_owner != client_id && !takeover {
+        if takeover {
+            let existing_clients = self
+                .terminal_attach_clients
+                .get(&terminal_id)
+                .map(|clients| {
+                    clients
+                        .iter()
+                        .copied()
+                        .filter(|existing_client| *existing_client != client_id)
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            for existing_client in existing_clients {
                 self.send_to_client(
-                    client_id,
-                    ServerMessage::ServerShutdown {
-                        reason: Some(format!(
-                            "terminal attach failed: terminal {terminal_id} already has an attached client; retry with --takeover"
-                        )),
-                    },
-                );
-                self.remove_client(client_id);
-                return false;
-            }
-            if existing_owner != client_id {
-                self.send_to_client(
-                    existing_owner,
+                    existing_client,
                     ServerMessage::ServerShutdown {
                         reason: Some("terminal attach taken over".to_owned()),
                     },
                 );
-                self.remove_client(existing_owner);
+                self.remove_client(existing_client);
             }
         }
 
@@ -1372,8 +1382,10 @@ impl HeadlessServer {
         }
 
         info!(client_id, cols, rows, terminal_id = %terminal_id, "terminal attach client connected");
-        self.terminal_attach_owners
-            .insert(terminal_id.clone(), client_id);
+        self.terminal_attach_clients
+            .entry(terminal_id.clone())
+            .or_default()
+            .insert(client_id);
         self.app
             .state
             .direct_attach_resize_locks
@@ -2381,7 +2393,7 @@ mod tests {
             clients: HashMap::new(),
             next_client_id: 1,
             foreground_client_id: None,
-            terminal_attach_owners: HashMap::new(),
+            terminal_attach_clients: HashMap::new(),
             next_activity_stamp: 1,
             effective_size: (MIN_COLS, MIN_ROWS),
             shutting_down: false,
@@ -2427,6 +2439,36 @@ mod tests {
         )
     }
 
+    fn test_terminal_id(server: &mut HeadlessServer) -> (PaneId, String) {
+        let workspace = crate::workspace::Workspace::test_new("attached");
+        let pane_id = workspace.tabs[0].root_pane;
+        server.app.state.workspaces = vec![workspace];
+        server.app.state.ensure_test_terminals();
+        let terminal_id = server.app.state.workspaces[0]
+            .pane_state(pane_id)
+            .expect("pane")
+            .attached_terminal_id
+            .to_string();
+        (pane_id, terminal_id)
+    }
+
+    fn connect_test_client(
+        server: &mut HeadlessServer,
+        client_id: u64,
+    ) -> std::sync::mpsc::Receiver<Vec<u8>> {
+        let (writer, control_rx, _render_rx) = test_client_writer();
+        assert!(server.handle_server_event(ServerEvent::ClientConnected {
+            client_id,
+            cols: 80,
+            rows: 24,
+            cell_width_px: 0,
+            cell_height_px: 0,
+            render_encoding: RenderEncoding::TerminalAnsi,
+            writer,
+        }));
+        control_rx
+    }
+
     #[test]
     fn terminal_attach_rejects_missing_terminal_and_removes_client() {
         let mut server = test_headless_server();
@@ -2461,15 +2503,7 @@ mod tests {
     #[test]
     fn terminal_attach_client_exits_when_attached_pane_dies() {
         let mut server = test_headless_server();
-        let workspace = crate::workspace::Workspace::test_new("attached");
-        let pane_id = workspace.tabs[0].root_pane;
-        server.app.state.workspaces = vec![workspace];
-        server.app.state.ensure_test_terminals();
-        let terminal_id = server.app.state.workspaces[0]
-            .pane_state(pane_id)
-            .expect("pane")
-            .attached_terminal_id
-            .to_string();
+        let (pane_id, terminal_id) = test_terminal_id(&mut server);
         let (writer, control_rx, _render_rx) = test_client_writer();
 
         assert!(server.handle_server_event(ServerEvent::ClientConnected {
@@ -2488,14 +2522,126 @@ mod tests {
                 takeover: false,
             })
         );
-        assert_eq!(server.terminal_attach_owners.get(&terminal_id), Some(&7));
+        assert!(server
+            .terminal_attach_clients
+            .get(&terminal_id)
+            .is_some_and(|clients| clients.contains(&7)));
 
         assert!(server.handle_internal_event_with_forwarding(AppEvent::PaneDied { pane_id }));
 
         assert!(!server.clients.contains_key(&7));
-        assert!(!server.terminal_attach_owners.contains_key(&terminal_id));
+        assert!(!server.terminal_attach_clients.contains_key(&terminal_id));
         let reason = read_server_shutdown_reason(control_rx.recv().expect("shutdown message"));
         assert_eq!(reason, Some(format!("terminal {terminal_id} exited")));
+    }
+
+    #[test]
+    fn terminal_attach_allows_multiple_observers() {
+        let mut server = test_headless_server();
+        let (_pane_id, terminal_id) = test_terminal_id(&mut server);
+        let real_terminal_id = server
+            .terminal_id_by_string(&terminal_id)
+            .expect("real terminal id");
+        let control_a = connect_test_client(&mut server, 7);
+        let control_b = connect_test_client(&mut server, 8);
+
+        assert!(
+            server.handle_server_event(ServerEvent::ClientAttachTerminal {
+                client_id: 7,
+                terminal_id: terminal_id.clone(),
+                takeover: false,
+            })
+        );
+        assert!(
+            server.handle_server_event(ServerEvent::ClientAttachTerminal {
+                client_id: 8,
+                terminal_id: terminal_id.clone(),
+                takeover: false,
+            })
+        );
+
+        let attached = server
+            .terminal_attach_clients
+            .get(&terminal_id)
+            .expect("attached clients");
+        assert!(attached.contains(&7));
+        assert!(attached.contains(&8));
+        assert!(server
+            .app
+            .state
+            .direct_attach_resize_locks
+            .contains(&real_terminal_id));
+        assert!(control_a.try_recv().is_err());
+        assert!(control_b.try_recv().is_err());
+
+        server.remove_client(7);
+        assert!(server
+            .terminal_attach_clients
+            .get(&terminal_id)
+            .is_some_and(|clients| clients.contains(&8)));
+        assert!(server
+            .app
+            .state
+            .direct_attach_resize_locks
+            .contains(&real_terminal_id));
+
+        server.remove_client(8);
+        assert!(!server.terminal_attach_clients.contains_key(&terminal_id));
+        assert!(!server
+            .app
+            .state
+            .direct_attach_resize_locks
+            .contains(&real_terminal_id));
+    }
+
+    #[test]
+    fn terminal_attach_takeover_closes_existing_observers() {
+        let mut server = test_headless_server();
+        let (_pane_id, terminal_id) = test_terminal_id(&mut server);
+        let control_a = connect_test_client(&mut server, 7);
+        let control_b = connect_test_client(&mut server, 8);
+        let control_c = connect_test_client(&mut server, 9);
+
+        assert!(
+            server.handle_server_event(ServerEvent::ClientAttachTerminal {
+                client_id: 7,
+                terminal_id: terminal_id.clone(),
+                takeover: false,
+            })
+        );
+        assert!(
+            server.handle_server_event(ServerEvent::ClientAttachTerminal {
+                client_id: 8,
+                terminal_id: terminal_id.clone(),
+                takeover: false,
+            })
+        );
+        assert!(
+            server.handle_server_event(ServerEvent::ClientAttachTerminal {
+                client_id: 9,
+                terminal_id: terminal_id.clone(),
+                takeover: true,
+            })
+        );
+
+        assert!(!server.clients.contains_key(&7));
+        assert!(!server.clients.contains_key(&8));
+        assert!(server.clients.contains_key(&9));
+        let attached = server
+            .terminal_attach_clients
+            .get(&terminal_id)
+            .expect("attached clients");
+        assert_eq!(attached.len(), 1);
+        assert!(attached.contains(&9));
+        assert_eq!(
+            read_server_shutdown_reason(control_a.recv().expect("shutdown message")),
+            Some("terminal attach taken over".to_owned())
+        );
+        assert_eq!(
+            read_server_shutdown_reason(control_b.recv().expect("shutdown message")),
+            Some("terminal attach taken over".to_owned())
+        );
+        assert!(control_c.try_recv().is_err());
     }
 
     #[test]

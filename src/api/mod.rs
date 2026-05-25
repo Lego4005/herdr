@@ -44,6 +44,7 @@ pub(crate) fn request_changes_ui(request: &Request) -> bool {
             | Method::AgentStart(_)
             | Method::PaneSplit(_)
             | Method::PaneRename(_)
+            | Method::PaneSetWaveContract(_)
             | Method::PaneReportAgent(_)
             | Method::PaneClearAgentAuthority(_)
             | Method::PaneReleaseAgent(_)
@@ -426,6 +427,7 @@ fn api_method_name(method: &Method) -> &'static str {
         Method::PaneList(_) => "pane.list",
         Method::PaneGet(_) => "pane.get",
         Method::PaneRename(_) => "pane.rename",
+        Method::PaneSetWaveContract(_) => "pane.set_wave_contract",
         Method::PaneSendText(_) => "pane.send_text",
         Method::PaneSendKeys(_) => "pane.send_keys",
         Method::PaneSendInput(_) => "pane.send_input",

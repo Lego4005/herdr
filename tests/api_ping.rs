@@ -596,6 +596,28 @@ fn agent_start_creates_named_terminal_over_socket() {
     assert_eq!(agents[0]["terminal_id"], terminal_id);
     assert_eq!(agents[0]["name"], "main");
 
+    let root_pane_id = started["result"]["agent"]["pane_id"].as_str().unwrap();
+    let child = send_request(
+        &socket_path,
+        &format!(
+            r#"{{"id":"agent_start_child","method":"agent.start","params":{{"name":"child","target_pane_id":"{}","cwd":"{}","split":"down","argv":["/bin/sh","-c","printf child-start-ok; sleep 2"]}}}}"#,
+            root_pane_id,
+            base.display()
+        ),
+    );
+    assert_eq!(child["result"]["type"], "agent_started");
+    assert_eq!(child["result"]["agent"]["name"], "child");
+    assert_eq!(
+        child["result"]["agent"]["workspace_id"],
+        started["result"]["agent"]["workspace_id"]
+    );
+    assert_eq!(
+        child["result"]["agent"]["tab_id"],
+        started["result"]["agent"]["tab_id"]
+    );
+    assert_ne!(child["result"]["agent"]["pane_id"], root_pane_id);
+    assert_eq!(child["result"]["argv"][0], "/bin/sh");
+
     let duplicate = send_request(
         &socket_path,
         &format!(

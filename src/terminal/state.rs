@@ -39,6 +39,7 @@ pub struct TerminalState {
     pub hook_authority: Option<HookAuthority>,
     pub manual_label: Option<String>,
     pub agent_name: Option<String>,
+    pub wave_contract: Option<crate::wave::WaveContract>,
     hook_report_sequences: HashMap<String, u64>,
     pub state: AgentState,
     pub revision: u64,
@@ -55,6 +56,7 @@ impl TerminalState {
             hook_authority: None,
             manual_label: None,
             agent_name: None,
+            wave_contract: None,
             hook_report_sequences: HashMap::new(),
             state: AgentState::Unknown,
             revision: 0,
@@ -265,18 +267,43 @@ impl TerminalState {
         self.agent_name = None;
     }
 
+    pub fn set_wave_contract(&mut self, contract: crate::wave::WaveContract) {
+        self.wave_contract = contract.normalized();
+        self.revision = self.revision.saturating_add(1);
+    }
+
+    pub fn clear_wave_contract(&mut self) {
+        if self.wave_contract.take().is_some() {
+            self.revision = self.revision.saturating_add(1);
+        }
+    }
+
     pub fn is_agent_terminal(&self) -> bool {
         self.agent_name.is_some()
             || self.effective_agent_label().is_some()
             || self.launch_argv.is_some()
     }
 
-    pub fn border_label(&self, show_agent_labels: bool) -> Option<&str> {
-        self.manual_label.as_deref().or_else(|| {
-            show_agent_labels
-                .then(|| self.effective_agent_label())
-                .flatten()
-        })
+    pub fn pane_border_label(&self, show_agent_labels: bool) -> Option<String> {
+        if let Some(label) = self
+            .manual_label
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            return Some(label.to_string());
+        }
+        if let Some(contract_label) = self
+            .wave_contract
+            .as_ref()
+            .map(crate::wave::WaveContract::border_label)
+        {
+            return Some(contract_label);
+        }
+        if show_agent_labels {
+            return self.effective_agent_label().map(str::to_string);
+        }
+        None
     }
 
     fn recompute_effective_state(
@@ -479,23 +506,61 @@ mod tests {
     }
 
     #[test]
-    fn border_label_prefers_manual_label_over_agent_label() {
+    fn pane_border_label_prefers_manual_label_over_agent_label() {
         let mut terminal = test_terminal();
         terminal.set_detected_state(Some(Agent::Claude), AgentState::Idle);
 
-        assert_eq!(terminal.border_label(false), None);
-        assert_eq!(terminal.border_label(true), Some("claude"));
+        assert_eq!(terminal.pane_border_label(false), None);
+        assert_eq!(terminal.pane_border_label(true).as_deref(), Some("claude"));
 
         terminal.set_manual_label(" reviewer ".into());
-        assert_eq!(terminal.border_label(false), Some("reviewer"));
-        assert_eq!(terminal.border_label(true), Some("reviewer"));
+        assert_eq!(
+            terminal.pane_border_label(false).as_deref(),
+            Some("reviewer")
+        );
+        assert_eq!(
+            terminal.pane_border_label(true).as_deref(),
+            Some("reviewer")
+        );
 
         terminal.set_manual_label("   ".into());
-        assert_eq!(terminal.border_label(true), Some("claude"));
+        assert_eq!(terminal.pane_border_label(true).as_deref(), Some("claude"));
 
         terminal.set_manual_label("reviewer".into());
         terminal.clear_manual_label();
-        assert_eq!(terminal.border_label(true), Some("claude"));
+        assert_eq!(terminal.pane_border_label(true).as_deref(), Some("claude"));
+    }
+
+    #[test]
+    fn pane_border_label_uses_wave_contract_when_no_manual_or_agent_label_exists() {
+        let mut terminal = test_terminal();
+        terminal.set_detected_state(Some(Agent::Claude), AgentState::Working);
+        terminal.set_wave_contract(crate::wave::WaveContract {
+            title: "Wave 2: stale-binary research".into(),
+            pane_id: Some("pane-w2".into()),
+            mode: crate::wave::WaveMode::ReadOnly,
+            status: Some(crate::wave::WaveStatus::Queued),
+            lifecycle_lane: Some(crate::wave::WaveLifecycleLane::Running),
+            dependency: Some("after W1".into()),
+            report: crate::wave::WaveReportGate {
+                completed_fields: 0,
+                required_fields: 10,
+                completed_items: Vec::new(),
+            },
+            blast_radius: crate::wave::BlastRadius::Unknown,
+            prompt_delivery: None,
+            arcs: Vec::new(),
+        });
+
+        assert_eq!(
+            terminal.pane_border_label(true).as_deref(),
+            Some(
+                "Wave 2: stale-binary research | read-only | lane running | packet 0/10 | after W1"
+            )
+        );
+
+        terminal.set_manual_label("manual".into());
+        assert_eq!(terminal.pane_border_label(false).as_deref(), Some("manual"));
     }
 
     #[test]

@@ -72,6 +72,8 @@ pub struct PaneSnapshot {
     pub label: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wave_contract: Option<crate::wave::WaveContract>,
 }
 
 /// Serializable BSP tree.
@@ -277,12 +279,18 @@ fn capture_tab(
             .get(id)
             .and_then(|pane| terminals.get(&pane.attached_terminal_id))
             .and_then(|terminal| terminal.agent_name.clone());
+        let wave_contract = tab
+            .panes
+            .get(id)
+            .and_then(|pane| terminals.get(&pane.attached_terminal_id))
+            .and_then(|terminal| terminal.wave_contract.clone());
         panes.insert(
             id.raw(),
             PaneSnapshot {
                 cwd,
                 label,
                 agent_name,
+                wave_contract,
             },
         );
     }
@@ -442,6 +450,7 @@ mod tests {
                 cwd: PathBuf::from("/home/can/Projects/herdr"),
                 label: None,
                 agent_name: None,
+                wave_contract: None,
             },
         );
         panes.insert(
@@ -450,6 +459,22 @@ mod tests {
                 cwd: PathBuf::from("/home/can/Projects/website"),
                 label: Some("website".into()),
                 agent_name: None,
+                wave_contract: Some(crate::wave::WaveContract {
+                    title: "Wave 1: proof docs".into(),
+                    pane_id: Some("pane-w1".into()),
+                    mode: crate::wave::WaveMode::Write,
+                    status: Some(crate::wave::WaveStatus::Running),
+                    lifecycle_lane: Some(crate::wave::WaveLifecycleLane::Running),
+                    dependency: Some("parallel OK".into()),
+                    report: crate::wave::WaveReportGate {
+                        completed_fields: 4,
+                        required_fields: 10,
+                        completed_items: Vec::new(),
+                    },
+                    blast_radius: crate::wave::BlastRadius::None,
+                    prompt_delivery: None,
+                    arcs: Vec::new(),
+                }),
             },
         );
 
@@ -499,6 +524,14 @@ mod tests {
         assert_eq!(
             restored.workspaces[0].tabs[0].panes[&1].label.as_deref(),
             Some("website")
+        );
+        assert_eq!(
+            restored.workspaces[0].tabs[0].panes[&1]
+                .wave_contract
+                .as_ref()
+                .map(|contract| contract.border_label())
+                .as_deref(),
+            Some("Wave 1: proof docs | write | lane running | packet 4/10 | no overlap | parallel OK")
         );
         assert_eq!(
             restored.agent_panel_scope,
@@ -764,6 +797,7 @@ mod tests {
                 cwd: PathBuf::from("/tmp/this-directory-does-not-exist-for-herdr-test"),
                 label: None,
                 agent_name: None,
+                wave_contract: None,
             },
         );
         panes.insert(
@@ -774,6 +808,7 @@ mod tests {
                     .unwrap_or_else(|_| PathBuf::from("/tmp")),
                 label: None,
                 agent_name: None,
+                wave_contract: None,
             },
         );
 

@@ -62,6 +62,8 @@ pub enum Method {
     PaneGet(PaneTarget),
     #[serde(rename = "pane.rename")]
     PaneRename(PaneRenameParams),
+    #[serde(rename = "pane.set_wave_contract")]
+    PaneSetWaveContract(PaneSetWaveContractParams),
     #[serde(rename = "pane.send_text")]
     PaneSendText(PaneSendTextParams),
     #[serde(rename = "pane.send_keys")]
@@ -191,6 +193,8 @@ pub struct AgentStartParams {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tab_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_pane_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub split: Option<SplitDirection>,
     #[serde(default)]
     pub focus: bool,
@@ -227,6 +231,13 @@ pub struct PaneRenameParams {
     pub pane_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PaneSetWaveContractParams {
+    pub pane_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub contract: Option<crate::wave::WaveContract>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -629,6 +640,8 @@ pub struct PaneInfo {
     pub terminal_id: String,
     pub workspace_id: String,
     pub tab_id: String,
+    #[serde(default)]
+    pub is_root_pane: bool,
     pub focused: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cwd: Option<String>,
@@ -639,6 +652,8 @@ pub struct PaneInfo {
     pub agent_status: AgentStatus,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub custom_status: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wave_contract: Option<crate::wave::WaveContract>,
     pub revision: u64,
 }
 
@@ -742,7 +757,7 @@ pub enum EventData {
         workspace_id: String,
     },
     PaneCreated {
-        pane: PaneInfo,
+        pane: Box<PaneInfo>,
     },
     PaneClosed {
         pane_id: String,
@@ -817,6 +832,41 @@ mod tests {
         };
 
         let json = serde_json::to_string(&request).unwrap();
+        let restored: Request = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored, request);
+    }
+
+    #[test]
+    fn request_round_trips_for_pane_set_wave_contract() {
+        let request = Request {
+            id: "req_wave".into(),
+            method: Method::PaneSetWaveContract(PaneSetWaveContractParams {
+                pane_id: "1-1".into(),
+                contract: Some(crate::wave::WaveContract {
+                    title: "Wave 1: proof docs".into(),
+                    pane_id: Some("pane-w1".into()),
+                    mode: crate::wave::WaveMode::Write,
+                    status: Some(crate::wave::WaveStatus::Running),
+                    lifecycle_lane: Some(crate::wave::WaveLifecycleLane::Running),
+                    dependency: Some("parallel OK".into()),
+                    report: crate::wave::WaveReportGate {
+                        completed_fields: 4,
+                        required_fields: 10,
+                        completed_items: Vec::new(),
+                    },
+                    blast_radius: crate::wave::BlastRadius::None,
+                    prompt_delivery: None,
+                    arcs: vec![crate::wave::WaveArc {
+                        id: "A".into(),
+                        summary: "tier-v proof pack".into(),
+                        status: Some(crate::wave::WaveStatus::Running),
+                    }],
+                }),
+            }),
+        };
+
+        let json = serde_json::to_string(&request).unwrap();
+        assert!(json.contains("\"method\":\"pane.set_wave_contract\""));
         let restored: Request = serde_json::from_str(&json).unwrap();
         assert_eq!(restored, request);
     }
@@ -1120,12 +1170,14 @@ mod tests {
                     terminal_id: "term_example".into(),
                     workspace_id: "w_1".into(),
                     tab_id: "w_1:2".into(),
+                    is_root_pane: true,
                     focused: false,
                     cwd: Some("/tmp/review".into()),
                     label: None,
                     agent: None,
                     agent_status: AgentStatus::Unknown,
                     custom_status: None,
+                    wave_contract: None,
                     revision: 0,
                 },
             },

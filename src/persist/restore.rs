@@ -185,6 +185,10 @@ fn restore_tab(
             .get(id)
             .and_then(|old_id| snap.panes.get(old_id))
             .and_then(|p| p.agent_name.clone());
+        let saved_wave_contract = reverse_id_map
+            .get(id)
+            .and_then(|old_id| snap.panes.get(old_id))
+            .and_then(|p| p.wave_contract.clone());
 
         let tab_id = format!("{}:{}", workspace_id, number);
         match TerminalRuntime::spawn(
@@ -210,6 +214,9 @@ fn restore_tab(
                 }
                 if let Some(agent_name) = saved_agent_name {
                     terminal.set_agent_name(agent_name);
+                }
+                if let Some(wave_contract) = saved_wave_contract {
+                    terminal.set_wave_contract(wave_contract);
                 }
                 panes.insert(*id, PaneState::new(terminal_id.clone()));
                 terminal_runtimes.insert(terminal_id, runtime);

@@ -97,17 +97,6 @@ fn wait_for_socket(path: &Path, timeout: Duration) {
     panic!("socket did not appear at {}", path.display());
 }
 
-fn wait_for_file(path: &Path, timeout: Duration) {
-    let deadline = Instant::now() + timeout;
-    while Instant::now() < deadline {
-        if path.exists() {
-            return;
-        }
-        thread::sleep(Duration::from_millis(25));
-    }
-    panic!("file did not appear at {}", path.display());
-}
-
 fn spawn_server(config_home: &Path, runtime_dir: &Path, api_socket_path: &Path) -> SpawnedHerdr {
     fs::create_dir_all(config_home.join("herdr")).unwrap();
     fs::create_dir_all(runtime_dir).unwrap();
@@ -739,7 +728,7 @@ fn multi_client_allows_multiple_simultaneous_connections() {
 
     let server = spawn_server(&config_home, &runtime_dir, &api_socket);
     wait_for_socket(&api_socket, Duration::from_secs(10));
-    wait_for_file(&client_socket, Duration::from_secs(10));
+    wait_for_socket(&client_socket, Duration::from_secs(10));
 
     let mut client_a = connect_raw_client(&client_socket, 120, 40);
     let mut client_b = connect_raw_client(&client_socket, 100, 30);
@@ -773,7 +762,7 @@ fn multi_client_effective_size_shrinks_when_smaller_client_joins() {
 
     let server = spawn_server(&config_home, &runtime_dir, &api_socket);
     wait_for_socket(&api_socket, Duration::from_secs(10));
-    wait_for_file(&client_socket, Duration::from_secs(10));
+    wait_for_socket(&client_socket, Duration::from_secs(10));
 
     let (_workspace_id, pane_id) = create_workspace_and_root_pane(&api_socket, "size-shrink");
 
@@ -806,7 +795,7 @@ fn multi_client_broadcasts_frame_updates_to_all_clients_within_500ms() {
 
     let server = spawn_server(&config_home, &runtime_dir, &api_socket);
     wait_for_socket(&api_socket, Duration::from_secs(10));
-    wait_for_file(&client_socket, Duration::from_secs(10));
+    wait_for_socket(&client_socket, Duration::from_secs(10));
 
     let mut client_a = connect_raw_client(&client_socket, 100, 30);
     let mut client_b = connect_raw_client(&client_socket, 100, 30);
@@ -862,7 +851,7 @@ fn multi_client_disconnect_recalculates_to_next_smallest() {
 
     let server = spawn_server(&config_home, &runtime_dir, &api_socket);
     wait_for_socket(&api_socket, Duration::from_secs(10));
-    wait_for_file(&client_socket, Duration::from_secs(10));
+    wait_for_socket(&client_socket, Duration::from_secs(10));
 
     let (_workspace_id, pane_id) =
         create_workspace_and_root_pane(&api_socket, "size-next-smallest");
@@ -915,7 +904,7 @@ fn multi_client_smallest_leaving_resizes_up_for_remaining_clients() {
 
     let server = spawn_server(&config_home, &runtime_dir, &api_socket);
     wait_for_socket(&api_socket, Duration::from_secs(10));
-    wait_for_file(&client_socket, Duration::from_secs(10));
+    wait_for_socket(&client_socket, Duration::from_secs(10));
 
     let (_workspace_id, pane_id) = create_workspace_and_root_pane(&api_socket, "size-resize-up");
 
@@ -962,7 +951,7 @@ fn multi_client_client_crash_sigkill_does_not_affect_server() {
 
     let server = spawn_server(&config_home, &runtime_dir, &api_socket);
     wait_for_socket(&api_socket, Duration::from_secs(10));
-    wait_for_file(&client_socket, Duration::from_secs(10));
+    wait_for_socket(&client_socket, Duration::from_secs(10));
 
     let mut survivor = connect_raw_client(&client_socket, 100, 30);
     assert!(wait_for_frame(&mut survivor, Duration::from_secs(2)));
@@ -1018,7 +1007,7 @@ fn multi_client_rapid_connect_disconnect_stress_10_cycles() {
 
     let server = spawn_server(&config_home, &runtime_dir, &api_socket);
     wait_for_socket(&api_socket, Duration::from_secs(10));
-    wait_for_file(&client_socket, Duration::from_secs(10));
+    wait_for_socket(&client_socket, Duration::from_secs(10));
 
     for i in 0..10u16 {
         let mut client = connect_raw_client(&client_socket, 80 + i, 24 + (i % 4));

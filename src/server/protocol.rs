@@ -95,7 +95,7 @@ pub enum ClientMessage {
     AttachTerminal {
         /// Terminal id to attach to.
         terminal_id: String,
-        /// Replace an existing writable attach owner for this terminal.
+        /// Close existing attach observers for this terminal before attaching.
         takeover: bool,
     },
 }
