@@ -8113,6 +8113,8 @@ const INDEX_HTML: &str = r#"<!doctype html>
 	    let outputEvents = [];
 	    let missionImportEvents = [];
 	    let lastMissionSweep = null;
+	    let workroomProjection = null;
+	    let evidenceLedger = [];
 	    let missionRefreshInFlight = false;
 		    let reviewRefreshInFlight = false;
 		    let parentPaneId = null;
@@ -8144,7 +8146,8 @@ const INDEX_HTML: &str = r#"<!doctype html>
       inspectorAdvanced: 'herdr.desktop.inspectorAdvanced',
       roomContextVisible: 'herdr.desktop.roomContextVisible.v2',
       missionBoardCollapsed: 'herdr.desktop.missionBoardCollapsed',
-      missionRadarScan: 'herdr.desktop.missionRadarScan'
+      missionRadarScan: 'herdr.desktop.missionRadarScan',
+      evidenceLedger: 'herdr.desktop.evidenceLedger.v1'
     };
     const validDensities = new Set(['roomy', 'dense', 'tight']);
     const packetFields = [
@@ -9009,7 +9012,15 @@ const INDEX_HTML: &str = r#"<!doctype html>
 	        outputEvents.unshift(outputSnapshots[pane.pane_id]);
 	      });
 	      outputEvents = outputEvents.slice(0, 12);
-	      return result.summary || { children: 0, read: 0, ingested: 0, ready_packets: 0, needs_attention: 0, failed: 0 };
+	      const summary = result.summary || { children: 0, read: 0, ingested: 0, ready_packets: 0, needs_attention: 0, failed: 0 };
+	      recordEvidenceReceipt({
+	        kind: 'sweep',
+	        title: 'Mission sweep',
+	        paneId: parentPaneId || '',
+	        detail: `${summary.children || 0} children; ${summary.read || 0} read; packets ${summary.ready_packets || 0}/${summary.ingested || 0}; attention ${summary.needs_attention || 0}; failed ${summary.failed || 0}`,
+	        payload: summary
+	      });
+	      return summary;
 	    }
 
 	    async function refreshEvidence(options = {}) {
@@ -9298,6 +9309,45 @@ const INDEX_HTML: &str = r#"<!doctype html>
 		      return raw || 'now';
 		    }
 
+		    function hydrateEvidenceLedger() {
+		      const stored = readJsonPreference(viewPreferenceKeys.evidenceLedger, []);
+		      evidenceLedger = Array.isArray(stored) ? stored.slice(0, 50) : [];
+		    }
+
+		    function persistEvidenceLedger() {
+		      evidenceLedger = evidenceLedger.slice(0, 50);
+		      writeJsonPreference(viewPreferenceKeys.evidenceLedger, evidenceLedger);
+		    }
+
+		    function recordEvidenceReceipt(entry) {
+		      const now = new Date();
+		      const receipt = {
+		        id: entry.id || `${now.getTime()}-${Math.random().toString(36).slice(2, 8)}`,
+		        at: entry.at || now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }),
+		        kind: entry.kind || 'proof',
+		        title: entry.title || 'Proof receipt',
+		        paneId: entry.paneId || '',
+		        detail: entry.detail || '',
+		        payload: entry.payload || null
+		      };
+		      evidenceLedger = [
+		        receipt,
+		        ...evidenceLedger.filter(item => item.id !== receipt.id)
+		      ].slice(0, 50);
+		      persistEvidenceLedger();
+		      return receipt;
+		    }
+
+		    function evidenceLedgerRows(limit = 12) {
+		      const rows = evidenceLedger.slice(0, limit);
+		      if (!rows.length) return emptyRow('No proof receipts recorded yet.');
+		      return rows.map(receipt => {
+		        const wave = receipt.paneId ? waves[receipt.paneId] : null;
+		        const action = wave ? selectButton(wave, 'inspect') : '';
+		        return `<div class="ops-row"><span><strong>${escapeHtml(receipt.at)} ${escapeHtml(receipt.title)}</strong><div class="ops-sub">${escapeHtml(receipt.detail || receipt.paneId || receipt.kind)}</div></span><span class="ops-pill ${escapeHtml(receipt.kind === 'error' ? 'warn' : 'good')}">${escapeHtml(receipt.kind)}</span><span>${action}</span></div>`;
+		      }).join('');
+		    }
+
 	    async function sweepWallMission() {
 	      setCommandStatus('wall', 'Sweeping parent -> child terminal panes...');
 	      try {
@@ -9467,6 +9517,13 @@ const INDEX_HTML: &str = r#"<!doctype html>
 		    }
 
 		    function recordChildDispatch({ title, paneId, promptSent, argvText }) {
+		      recordEvidenceReceipt({
+		        kind: promptSent ? 'launch' : 'error',
+		        title: `Child launch: ${title}`,
+		        paneId,
+		        detail: `${promptSent ? 'brief sent' : 'brief not sent'}; ${argvText || 'split pane'}`,
+		        payload: { promptSent: Boolean(promptSent), argvText: argvText || 'split pane' }
+		      });
 		      recordDispatch({
 		        target: `child dispatch: ${title}`,
 		        requested: 1,
@@ -9591,6 +9648,13 @@ const INDEX_HTML: &str = r#"<!doctype html>
 		        const done = Number(result.completed_fields || 0);
 		        const required = Number(result.required_fields || packetFields.length);
 		        document.getElementById('controlTarget').textContent = `ingested ${detected}; packet ${done}/${required}`;
+		        recordEvidenceReceipt({
+		          kind: 'packet',
+		          title: `Packet ingest: ${wave.title}`,
+		          paneId: wave.id,
+		          detail: `${detected} detected; packet ${done}/${required}`,
+		          payload: result
+		        });
 		        await loadPanes(wave.id);
 		      } catch (error) {
 		        document.getElementById('controlTarget').textContent = error.message || 'ingest failed';
@@ -9620,6 +9684,13 @@ const INDEX_HTML: &str = r#"<!doctype html>
 		        };
 		        outputEvents.unshift(outputSnapshots[wave.id]);
 		        outputEvents = outputEvents.slice(0, 8);
+		        recordEvidenceReceipt({
+		          kind: 'read',
+		          title: `Read output: ${wave.title}`,
+		          paneId: wave.id,
+		          detail: `${output.nonempty_line_count || 0} non-empty lines; last: ${output.last_nonempty_line || 'none'}`,
+		          payload: outputSnapshots[wave.id]
+		        });
 		        renderWaveGrid();
 		        renderSelectedOutput(wave.id);
 		        renderWallReadout(wave.id);
@@ -9706,6 +9777,13 @@ const INDEX_HTML: &str = r#"<!doctype html>
 		        if (deckStatus) deckStatus.textContent = shouldUnlock
 		          ? `${wave.title} accepted. Checking dependency gates.`
 		          : `${wave.title} marked ${labelFromSnake(status, status)}.`;
+		        recordEvidenceReceipt({
+		          kind: status === 'accepted' ? 'accept' : 'review',
+		          title: `Parent verdict: ${wave.title}`,
+		          paneId: wave.id,
+		          detail: `${wave.title} marked ${labelFromSnake(status, status)}`,
+		          payload: payload.result || {}
+		        });
 		        await loadPanes(wave.id);
 		        if (shouldUnlock) await unlockReadyWaves('deck');
 		      } catch (error) {
@@ -10428,6 +10506,38 @@ const INDEX_HTML: &str = r#"<!doctype html>
 	      const focused = panes.find(pane => pane.focused) || panes[0];
 	      const workspace = workspaces.find(item => item.workspace_id === focused?.workspace_id) || workspaces[0];
 	      return basename(focused?.cwd) || (looksLikeOldDemoLabel(workspace?.label) ? '' : workspace?.label) || focused?.workspace_id || 'Herdr project';
+	    }
+
+	    function workroomPaneEntries(workroom = workroomProjection) {
+	      if (!workroom) return [];
+	      return [workroom.parent, ...(Array.isArray(workroom.children) ? workroom.children : [])].filter(Boolean);
+	    }
+
+	    function workroomPaneMap(workroom = workroomProjection) {
+	      return new Map(workroomPaneEntries(workroom).map(pane => [pane.pane_id, pane]));
+	    }
+
+	    function applyWorkroomProjection(wave, model) {
+	      if (!wave || !model) return wave;
+	      wave.workroom = model;
+	      wave.role = model.role || wave.role;
+	      wave.mode = model.mode ? labelFromSnake(model.mode, wave.mode) : wave.mode;
+	      wave.status = model.status ? labelFromSnake(model.status, wave.status) : wave.status;
+	      wave.lifecycleLane = model.lifecycle_lane || wave.lifecycleLane;
+	      wave.depends = model.dependency || wave.depends;
+	      wave.blast = model.blast_radius ? labelFromSnake(model.blast_radius, wave.blast) : wave.blast;
+	      wave.packetLabel = model.packet || wave.packetLabel;
+	      wave.hasContract = Boolean(model.has_contract);
+	      if (model.terminal_id) wave.terminal = model.terminal_id;
+	      if (model.workspace_id) wave.workspaceId = model.workspace_id;
+	      if (model.tab_id) wave.tabId = model.tab_id;
+	      if (model.cwd) wave.cwd = model.cwd;
+	      if (model.role === 'parent') {
+	        wave.title = 'Parent session';
+	      } else if (model.title) {
+	        wave.title = sessionDisplayTitle(model.title, wave.title);
+	      }
+	      return wave;
 	    }
 
 	    function paneToWave(pane, index) {
@@ -11875,15 +11985,17 @@ const INDEX_HTML: &str = r#"<!doctype html>
 			        opsCard('Governor', 'Scope and packet gates', governanceRows)
 			      ].join('');
 
-		      evidenceBoard.innerHTML = list.length ? [
-		        opsCard('Claims', 'Child evidence ledger', list.map(wave => {
+		      const proofReceiptRows = evidenceLedgerRows(12);
+		      evidenceBoard.innerHTML = [
+		        opsCard('Proof receipts', 'Launch, read, packet, sweep, and parent verdict receipts', proofReceiptRows, true),
+		        list.length ? opsCard('Claims', 'Child evidence ledger', list.map(wave => {
 		          const done = donePacketFields(wave);
 		          const claim = wave.pane.wave_contract ? wave.arcs : 'No contract attached yet';
 		          const receipts = done.length ? done.join(', ') : 'No receipts yet';
 		          const files = gitEntriesForWave(wave).filter(entry => !localOnlyPath(entry.path)).length;
 		          return paneOpsRow(wave, `Claim: ${claim}. Receipts: ${receipts}. Git files visible: ${files}.`, `<span class="ops-pill ${packetTone(wave)}">${escapeHtml(wave.packetLabel)}</span> ${readButton(wave)} ${ingestButton(wave)} ${selectButton(wave)}`);
-		        }).join(''), true)
-		      ].join('') : opsCard('Claims', 'Child evidence ledger', emptyRow('Create a child pane to start collecting evidence.'), true);
+		        }).join(''), true) : opsCard('Claims', 'Child evidence ledger', emptyRow('Create a child pane to start collecting evidence.'), true)
+		      ].join('');
 
 		      const changedRows = primaryChanges.length
 		        ? primaryChanges.slice(0, 16).map(entry => `<div class="ops-row"><span><strong>${escapeHtml(entry.path)}</strong><div class="ops-sub">${escapeHtml(entry.cwd || '')}${entry.old_path ? `; from ${escapeHtml(entry.old_path)}` : ''}</div></span><span class="ops-pill ${entry.untracked ? 'warn' : ''}">${escapeHtml(gitCodeLabel(entry))}</span><span></span></div>`).join('')
@@ -11958,9 +12070,13 @@ const INDEX_HTML: &str = r#"<!doctype html>
 			        return paneOpsRow(wave, `${index + 1}. ${focus}; ${wave.terminal}; packet ${wave.packetLabel}`, selectButton(wave));
 			      }).join(''), true),
 			        opsCard('Mission imports', 'Session files applied to panes', importRows, true),
+			        opsCard('Proof receipts', 'Runtime proof trail', proofReceiptRows, true),
 			        opsCard('Dispatch receipts', 'Parent-to-child messages', dispatchReceiptRows, true),
 			        opsCard('Read snapshots', 'Parent-read child output', outputRows, true)
-			      ].join('') : opsCard('Timeline', 'Current pane lifecycle', emptyRow('Pane lifecycle events will appear once the mission has panes.'), true);
+			      ].join('') : [
+			        opsCard('Timeline', 'Current pane lifecycle', emptyRow('Pane lifecycle events will appear once the mission has panes.'), true),
+			        opsCard('Proof receipts', 'Runtime proof trail', proofReceiptRows, true)
+			      ].join('');
 			    }
 
     function bindWaveInteractions() {
@@ -12316,6 +12432,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
     function initializeViewPreferences() {
       setDensity(readPreference(viewPreferenceKeys.density, 'dense'), { persist: false, reconnect: false });
       missionRadarScan = readJsonPreference(viewPreferenceKeys.missionRadarScan, null);
+      hydrateEvidenceLedger();
       missionBoardCollapsedLanes = loadMissionBoardCollapsedLanes();
       setWallHudExpanded(false);
       setRoomContextVisible(readPreference(viewPreferenceKeys.roomContextVisible, '0') === '1', { persist: false });
@@ -12467,51 +12584,75 @@ const INDEX_HTML: &str = r#"<!doctype html>
 
 		    async function loadPanes(preferredPaneId = null) {
 	      setRuntimeStatus('loading panes', false);
-	      const [workspaceResponse, paneResponse] = await Promise.all([
+	      const selectedParam = preferredPaneId || selectedWaveId || '';
+	      const workroomUrl = selectedParam
+	        ? `/mission/workroom?selected=${encodeURIComponent(selectedParam)}`
+	        : '/mission/workroom';
+	      const [workspaceResponse, paneResponse, workroomResponse] = await Promise.all([
 	        fetch('/workspaces', { cache: 'no-store' }),
-	        fetch('/panes', { cache: 'no-store' })
+	        fetch('/panes', { cache: 'no-store' }),
+	        fetch(workroomUrl, { cache: 'no-store' })
 	      ]);
 	      const workspacePayload = await workspaceResponse.json();
 	      const payload = await paneResponse.json();
+	      const workroomPayload = await workroomResponse.json();
 	      if (workspacePayload.error) throw new Error(workspacePayload.error.message || 'workspace list failed');
 	      if (payload.error) throw new Error(payload.error.message || 'pane list failed');
+	      if (workroomPayload.error) throw new Error(workroomPayload.error.message || 'workroom projection failed');
 	      workspaces = workspacePayload.result?.workspaces || [];
+	      workroomProjection = workroomPayload.result?.workroom || null;
 	      const panes = payload.result?.panes || [];
 	      const projectLabel = currentProjectLabel(panes);
 	      document.getElementById('brandLabel').textContent = `Herdr Workroom - ${projectLabel}`;
 	      document.getElementById('projectNodeLabel').textContent = projectLabel;
-	      const waveList = panes.map((pane, index) => paneToWave(pane, index));
+	      const workroomById = workroomPaneMap(workroomProjection);
+	      const childPaneIds = new Set((workroomProjection?.children || []).map(pane => pane.pane_id));
+	      const waveList = panes.map((pane, index) => applyWorkroomProjection(
+	        paneToWave(pane, index),
+	        workroomById.get(pane.pane_id)
+	      ));
 	      const parentCandidate =
-	        waveList.find(wave => wave.isRoot && wave.pane.focused)
+	        (workroomProjection?.parent?.pane_id
+	          ? waveList.find(wave => wave.id === workroomProjection.parent.pane_id)
+	          : null)
+	        || waveList.find(wave => wave.isRoot && wave.pane.focused)
 	        || waveList.find(wave => wave.isRoot)
 	        || waveList[0]
 	        || null;
 	      parentPaneId = parentCandidate?.id || null;
 	      waveList.forEach((wave, index) => {
-	        wave.role = parentPaneId && wave.id === parentPaneId ? 'parent' : 'child';
+	        wave.role = parentPaneId && wave.id === parentPaneId
+	          ? 'parent'
+	          : childPaneIds.has(wave.id)
+	            ? 'child'
+	            : 'child';
 	        if (wave.role === 'parent') {
 	          wave.title = 'Parent session';
 	        } else if (wave.role === 'child' && wave.title === 'Parent session') {
 	          wave.title = `Child pane ${index + 1}`;
 	        }
 	      });
-	      const childCount = Math.max(0, waveList.length - (parentPaneId ? 1 : 0));
+	      const stats = workroomProjection?.stats;
+	      const childCount = Number(stats?.child_count ?? Math.max(0, waveList.length - (parentPaneId ? 1 : 0)));
 	      document.getElementById('parentTitle').textContent = projectLabel;
-	      const contractCount = waveList.filter(wave => wave.role === 'child' && wave.pane.wave_contract).length;
+	      const contractCount = Number(stats?.attached_contracts ?? waveList.filter(wave => wave.role === 'child' && wave.pane.wave_contract).length);
 	      const needsReview = waveList.filter(wave => {
 	        if (wave.role !== 'child') return false;
 	        const pane = wave.pane;
 	        const status = labelFromSnake(pane.wave_contract?.status || pane.custom_status || pane.agent_status, '');
 	        return status.includes('needs') || status.includes('blocked');
 	      }).length;
-	      const parentDecisionWord = needsReview === 1 ? '' : 's';
+	      const attentionCount = Number(stats?.needs_attention ?? needsReview);
+	      const parentDecisionWord = attentionCount === 1 ? '' : 's';
 	      document.getElementById('parentSummary').textContent = waveList.length
-	        ? `Parent pane ${parentPaneId || 'unknown'} with ${childCount} child pane${childCount === 1 ? '' : 's'} live; ${contractCount} child contract${contractCount === 1 ? '' : 's'}; ${needsReview} parent decision${parentDecisionWord}.`
+	        ? `Parent pane ${parentPaneId || 'unknown'} with ${childCount} child pane${childCount === 1 ? '' : 's'} live; ${contractCount} child contract${contractCount === 1 ? '' : 's'}; ${attentionCount} parent decision${parentDecisionWord}.`
 	        : 'No panes are currently visible in this project session.';
 	      waves = Object.fromEntries(waveList.map(wave => [wave.id, wave]));
 	      await loadGitStatuses(Object.values(waves));
 	      selectedWaveId = preferredPaneId && waves[preferredPaneId]
 	        ? preferredPaneId
+	        : workroomProjection?.selected_pane_id && waves[workroomProjection.selected_pane_id]
+	          ? workroomProjection.selected_pane_id
 	        : selectedWaveId && waves[selectedWaveId]
 	          ? selectedWaveId
 	          : parentPaneId || Object.keys(waves)[0] || null;
@@ -13436,7 +13577,9 @@ mod tests {
         assert!(INDEX_HTML.contains("sweep blocker"));
         assert!(INDEX_HTML.contains("No sweep blockers from latest child read."));
         assert!(INDEX_HTML.contains("parentDecisionWord"));
-        assert!(INDEX_HTML.contains("${needsReview} parent decision${parentDecisionWord}"));
+        assert!(INDEX_HTML
+            .contains("const attentionCount = Number(stats?.needs_attention ?? needsReview);"));
+        assert!(INDEX_HTML.contains("${attentionCount} parent decision${parentDecisionWord}"));
         assert!(!INDEX_HTML.contains("${needsReview} ${attentionWord} attention."));
         assert!(!INDEX_HTML.contains("needs-input items"));
         assert!(!INDEX_HTML.contains("0 attention."));
@@ -13832,6 +13975,27 @@ mod tests {
             "toggleChrome('show-roster', 'rosterToggle', viewPreferenceKeys.roster, { persist: false });"
         ));
         assert!(INDEX_HTML.matches("closeViewMenu();").count() >= 4);
+    }
+
+    #[test]
+    fn desktop_shell_loads_workroom_projection_as_parent_child_truth() {
+        assert!(INDEX_HTML.contains("let workroomProjection = null;"));
+        assert!(INDEX_HTML.contains("const workroomUrl ="));
+        assert!(INDEX_HTML.contains("/mission/workroom"));
+        assert!(INDEX_HTML.contains("fetch(workroomUrl, { cache: 'no-store' })"));
+        assert!(INDEX_HTML.contains("function applyWorkroomProjection(wave, model)"));
+        assert!(INDEX_HTML.contains("workroomProjection?.selected_pane_id"));
+        assert!(INDEX_HTML.contains("workroomProjection?.stats"));
+    }
+
+    #[test]
+    fn desktop_shell_records_proof_receipts_as_evidence_ledger() {
+        assert!(INDEX_HTML.contains("let evidenceLedger = [];"));
+        assert!(INDEX_HTML.contains("evidenceLedger: 'herdr.desktop.evidenceLedger.v1'"));
+        assert!(INDEX_HTML.contains("function recordEvidenceReceipt(entry)"));
+        assert!(INDEX_HTML.contains("persistEvidenceLedger();"));
+        assert!(INDEX_HTML.contains("Proof receipts"));
+        assert!(INDEX_HTML.contains("recordEvidenceReceipt({"));
     }
 
     #[test]
