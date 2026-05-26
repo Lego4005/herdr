@@ -33,6 +33,7 @@ use crate::wave::{
     WaveReportGate, WaveStatus,
 };
 
+mod project_home_model;
 mod workroom_model;
 
 const DEFAULT_BIND_ADDR: &str = "127.0.0.1:0";
@@ -303,6 +304,8 @@ fn handle_http_connection(mut stream: TcpStream) -> io::Result<()> {
         "/mission/import" => handle_mission_import(stream, query),
         "/mission/radar" => handle_mission_radar(stream, query),
         "/mission/workroom" => handle_mission_workroom(stream, query),
+        "/project/home" => handle_project_home(stream, query),
+        "/mission/events" => handle_mission_events(stream, query),
         "/events" => handle_events(stream, query),
         "/input" => handle_input(stream, query),
         "/pane/input" => handle_pane_input(stream, query),
@@ -414,11 +417,85 @@ fn handle_workspaces(mut stream: TcpStream) -> io::Result<()> {
 }
 
 fn handle_panes(mut stream: TcpStream) -> io::Result<()> {
-    let response = send_api_request(&Request {
+    let mut response = send_api_request(&Request {
         id: "desktop:pane:list".into(),
         method: Method::PaneList(PaneListParams { workspace_id: None }),
     })?;
+    apply_recorded_packets_to_panes_response(&mut response);
     write_json_response(&mut stream, &response)
+}
+
+fn apply_recorded_packets_to_panes_response(response: &mut serde_json::Value) {
+    if response.get("error").is_some() {
+        return;
+    }
+    let Ok(store) = crate::mission_record::MissionStore::default_store() else {
+        return;
+    };
+    let Some(panes) = response
+        .pointer_mut("/result/panes")
+        .and_then(serde_json::Value::as_array_mut)
+    else {
+        return;
+    };
+    for pane in panes {
+        let Some(pane_id) = pane
+            .get("pane_id")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string)
+        else {
+            continue;
+        };
+        let Some(packet) = store.packet_for_pane(&pane_id).ok().flatten() else {
+            continue;
+        };
+        merge_recorded_packet_into_pane_value(pane, &packet);
+    }
+}
+
+fn merge_recorded_packet_into_pane_value(
+    pane: &mut serde_json::Value,
+    packet: &crate::mission_record::MissionPacket,
+) -> bool {
+    let Some(contract) = pane
+        .get_mut("wave_contract")
+        .and_then(serde_json::Value::as_object_mut)
+    else {
+        return false;
+    };
+    contract.insert("report".into(), recorded_packet_report_value(packet));
+    true
+}
+
+fn recorded_packet_report_value(
+    packet: &crate::mission_record::MissionPacket,
+) -> serde_json::Value {
+    let mut completed_items = Vec::new();
+    for item in default_report_packet_items() {
+        if packet.fields.contains_key(*item) {
+            completed_items.push(item.to_string());
+        }
+    }
+    let mut extra_items: Vec<String> = packet
+        .fields
+        .keys()
+        .filter(|field| {
+            !default_report_packet_items()
+                .iter()
+                .any(|item| field.eq_ignore_ascii_case(item))
+        })
+        .cloned()
+        .collect();
+    extra_items.sort();
+    completed_items.extend(extra_items);
+    let required_fields = default_report_packet_items().len().min(u8::MAX as usize) as u8;
+    let completed_fields = completed_items.len().min(usize::from(required_fields)) as u8;
+
+    serde_json::json!({
+        "completed_fields": completed_fields,
+        "required_fields": required_fields,
+        "completed_items": completed_items,
+    })
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -454,6 +531,7 @@ fn resolve_desktop_agent_argv_from_paths(
     path_env: Option<&OsStr>,
     extra_dirs: &[PathBuf],
 ) -> Vec<String> {
+    let argv = expand_desktop_agent_recipe_argv(argv);
     let Some((program, args)) = argv.split_first() else {
         return Vec::new();
     };
@@ -468,6 +546,22 @@ fn resolve_desktop_agent_argv_from_paths(
     }
     resolved.extend(args.iter().cloned());
     resolved
+}
+
+fn expand_desktop_agent_recipe_argv(argv: &[String]) -> Vec<String> {
+    let Some((program, args)) = argv.split_first() else {
+        return Vec::new();
+    };
+    match program.as_str() {
+        "dsp" => {
+            let mut expanded = Vec::with_capacity(argv.len() + 1);
+            expanded.push("claude".to_string());
+            expanded.push("--dangerously-skip-permissions".to_string());
+            expanded.extend(args.iter().cloned());
+            expanded
+        }
+        _ => argv.to_vec(),
+    }
 }
 
 fn desktop_integration_state_label(
@@ -630,6 +724,14 @@ fn handle_mission_import(mut stream: TcpStream, query: Option<&str>) -> io::Resu
             return write_text_response(&mut stream, 400, "Bad Request", &format!("{err}\n"))
         }
     };
+    let mission_record = ensure_import_mission_record(path);
+    let (mission_record_value, mission_record_error) = match &mission_record {
+        Ok(mission) => (
+            Some(serde_json::to_value(mission).map_err(io::Error::other)?),
+            None,
+        ),
+        Err(error) => (None, Some(error.clone())),
+    };
     let apply =
         !query_value(query, "apply").is_some_and(|value| matches!(value, "0" | "false" | "no"));
 
@@ -732,6 +834,17 @@ fn handle_mission_import(mut stream: TcpStream, query: Option<&str>) -> io::Resu
                 } else {
                     MissionImportAssignmentStatus::Applied
                 };
+                if let Ok(mission) = &mission_record {
+                    let contract_json = serde_json::to_string(&contract).ok();
+                    record_mission_child_best_effort(
+                        mission.id,
+                        &pane_id,
+                        assignment.terminal_id.as_deref(),
+                        "generic",
+                        contract_json.as_deref(),
+                        "running",
+                    );
+                }
                 if prompt_this_pane {
                     match send_mission_import_contract_prompt(path, &pane_id, &contract)? {
                         Ok(()) => assignment.prompt_sent = true,
@@ -766,10 +879,163 @@ fn handle_mission_import(mut stream: TcpStream, query: Option<&str>) -> io::Resu
                 "apply": apply,
                 "create_missing": create_missing,
                 "gate_dependencies": gate_dependencies,
-                "prompt_scope": prompt_scope
+                "prompt_scope": prompt_scope,
+                "mission_record": mission_record_value,
+                "mission_record_error": mission_record_error
             }
         }),
     )
+}
+
+fn handle_mission_events(mut stream: TcpStream, query: Option<&str>) -> io::Result<()> {
+    let mission_id = query_value(query, "mission_id").and_then(|value| value.parse::<i64>().ok());
+    let pane_id = query_value(query, "pane_id").and_then(percent_decode_string);
+    let limit = query_value(query, "limit").and_then(|value| value.parse::<usize>().ok());
+    let store = crate::mission_record::MissionStore::default_store().map_err(io::Error::other)?;
+    let events = store
+        .list_events(crate::mission_record::MissionEventQuery {
+            mission_id,
+            pane_id,
+            limit,
+        })
+        .map_err(io::Error::other)?;
+    let mission = store.get_mission(mission_id).ok();
+    write_json_response(
+        &mut stream,
+        &serde_json::json!({
+            "id": "desktop:mission:events",
+            "result": {
+                "type": "mission_events",
+                "events": events,
+                "mission": mission
+            }
+        }),
+    )
+}
+
+fn ensure_import_mission_record(
+    path: &str,
+) -> Result<crate::mission_record::MissionSnapshot, String> {
+    let path_buf = PathBuf::from(path);
+    let title = path_buf
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .map(|stem| stem.replace('-', " "))
+        .unwrap_or_else(|| "Herdr Mission".into());
+    let project_root = project_root_for_session_record(&path_buf)
+        .or_else(|| std::env::current_dir().ok())
+        .unwrap_or_else(|| PathBuf::from("."));
+    let store =
+        crate::mission_record::MissionStore::default_store().map_err(|err| err.to_string())?;
+    store
+        .init_mission_with_path(&project_root, &title, &path_buf)
+        .map_err(|err| err.to_string())
+}
+
+fn project_root_for_session_record(path: &Path) -> Option<PathBuf> {
+    let mut current = path.parent();
+    while let Some(dir) = current {
+        if dir.file_name().and_then(|name| name.to_str()) == Some(".sessions") {
+            return dir.parent().map(Path::to_path_buf);
+        }
+        current = dir.parent();
+    }
+    None
+}
+
+fn record_mission_child_best_effort(
+    mission_id: i64,
+    pane_id: &str,
+    terminal_id: Option<&str>,
+    provider: &str,
+    contract_json: Option<&str>,
+    status: &str,
+) {
+    let Ok(store) = crate::mission_record::MissionStore::default_store() else {
+        return;
+    };
+    let _ = store.upsert_child(
+        mission_id,
+        pane_id,
+        terminal_id,
+        provider,
+        contract_json,
+        status,
+    );
+}
+
+fn record_mission_event_best_effort(
+    mission_id: Option<i64>,
+    pane_id: Option<String>,
+    provider: &str,
+    kind: &str,
+    text: Option<String>,
+    payload: serde_json::Value,
+) {
+    let Ok(store) = crate::mission_record::MissionStore::default_store() else {
+        return;
+    };
+    let _ = store.record_event(crate::mission_record::MissionEventInput {
+        mission_id,
+        pane_id,
+        provider: provider.into(),
+        kind: kind.into(),
+        text,
+        payload,
+    });
+}
+
+fn record_report_ingest_best_effort(
+    pane_id: &str,
+    report: &ReportIngestSnapshot,
+) -> Option<crate::mission_record::MissionPacket> {
+    let store = crate::mission_record::MissionStore::default_store().ok()?;
+    let mission_id = store.resolve_mission_id(None, Some(pane_id)).ok()?;
+    let mut latest = None;
+    for field in &report.completed_items {
+        latest = store
+            .update_packet_field(
+                mission_id,
+                pane_id,
+                field,
+                "detected via /pane/ingest-report",
+            )
+            .ok();
+    }
+    if report.ready() {
+        latest = store.mark_packet_ready(mission_id, pane_id).ok();
+    }
+    latest
+}
+
+fn merge_recorded_packet_report(
+    pane_id: &str,
+    current: Option<ReportIngestSnapshot>,
+) -> Option<ReportIngestSnapshot> {
+    let Ok(store) = crate::mission_record::MissionStore::default_store() else {
+        return current;
+    };
+    let Some(packet) = store.packet_for_pane(pane_id).ok().flatten() else {
+        return current;
+    };
+    let recorded = report_snapshot_from_packet(&packet);
+    match current {
+        Some(current) if current.completed_fields >= recorded.completed_fields => Some(current),
+        _ => Some(recorded),
+    }
+}
+
+fn report_snapshot_from_packet(
+    packet: &crate::mission_record::MissionPacket,
+) -> ReportIngestSnapshot {
+    let completed_items: Vec<String> = packet.fields.keys().cloned().collect();
+    let report = WaveReportGate {
+        completed_fields: completed_items.len().min(u8::MAX as usize) as u8,
+        required_fields: default_report_packet_items().len().min(u8::MAX as usize) as u8,
+        completed_items: completed_items.clone(),
+    }
+    .normalized();
+    ReportIngestSnapshot::from_gates(&report, &report)
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1403,6 +1669,20 @@ fn handle_pane_dispatch(mut stream: TcpStream, query: Option<&str>) -> io::Resul
         .collect();
 
     let summary = PaneDispatchSummary::from_receipts(target_label, receipts);
+    record_mission_event_best_effort(
+        None,
+        summary
+            .receipts
+            .first()
+            .map(|receipt| receipt.pane_id.clone()),
+        "generic",
+        "parent_dispatch",
+        Some(format!(
+            "{} delivered {}/{}",
+            summary.target, summary.sent, summary.requested
+        )),
+        serde_json::to_value(&summary).unwrap_or(serde_json::Value::Null),
+    );
     let event = record_dispatch_event(summary)?;
     write_json_response(
         &mut stream,
@@ -1475,7 +1755,7 @@ fn handle_mission_workroom(mut stream: TcpStream, query: Option<&str>) -> io::Re
         .and_then(percent_decode_string)
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty());
-    let panes_response = send_api_request(&Request {
+    let mut panes_response = send_api_request(&Request {
         id: "desktop:mission-workroom:panes".into(),
         method: Method::PaneList(PaneListParams { workspace_id: None }),
     })?;
@@ -1483,6 +1763,7 @@ fn handle_mission_workroom(mut stream: TcpStream, query: Option<&str>) -> io::Re
     if panes_response.get("error").is_some() {
         return write_json_response_with_status(&mut stream, 409, "Conflict", &panes_response);
     }
+    apply_recorded_packets_to_panes_response(&mut panes_response);
 
     let panes = panes_response
         .pointer("/result/panes")
@@ -1502,6 +1783,63 @@ fn handle_mission_workroom(mut stream: TcpStream, query: Option<&str>) -> io::Re
             }
         }),
     )
+}
+
+fn handle_project_home(mut stream: TcpStream, query: Option<&str>) -> io::Result<()> {
+    let selected_pane_id = query_value(query, "selected_pane_id")
+        .or_else(|| query_value(query, "selected"))
+        .and_then(percent_decode_string)
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    let mut panes_response = send_api_request(&Request {
+        id: "desktop:project-home:panes".into(),
+        method: Method::PaneList(PaneListParams { workspace_id: None }),
+    })?;
+
+    if panes_response.get("error").is_some() {
+        return write_json_response_with_status(&mut stream, 409, "Conflict", &panes_response);
+    }
+    apply_recorded_packets_to_panes_response(&mut panes_response);
+
+    let panes = panes_response
+        .pointer("/result/panes")
+        .and_then(serde_json::Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or(&[]);
+    let workroom =
+        workroom_model::WorkroomView::from_pane_values(panes, selected_pane_id.as_deref());
+    let project_label = project_label_from_panes(panes).unwrap_or_else(|| "Herdr project".into());
+    let project_home = project_home_model::ProjectHomeView::from_workroom(&workroom, project_label);
+
+    write_json_response(
+        &mut stream,
+        &serde_json::json!({
+            "id": "desktop:project-home",
+            "result": {
+                "type": "project_home",
+                "workroom": workroom,
+                "project_home": project_home,
+            }
+        }),
+    )
+}
+
+fn project_label_from_panes(panes: &[serde_json::Value]) -> Option<String> {
+    panes
+        .iter()
+        .find(|pane| {
+            pane.get("focused")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false)
+        })
+        .or_else(|| panes.first())
+        .and_then(|pane| pane.get("cwd").and_then(serde_json::Value::as_str))
+        .and_then(|cwd| {
+            Path::new(cwd)
+                .file_name()
+                .and_then(|name| name.to_str())
+                .map(str::to_string)
+        })
 }
 
 fn handle_mission_sweep(mut stream: TcpStream, query: Option<&str>) -> io::Result<()> {
@@ -1982,6 +2320,7 @@ fn handle_pane_ingest_report(mut stream: TcpStream, query: Option<&str>) -> io::
             );
         }
     };
+    let recorded_packet = record_report_ingest_best_effort(&pane_id, &report);
 
     write_json_response(
         &mut stream,
@@ -1994,6 +2333,7 @@ fn handle_pane_ingest_report(mut stream: TcpStream, query: Option<&str>) -> io::
                 "missing_items": report.missing_items,
                 "completed_fields": report.completed_fields,
                 "required_fields": report.required_fields,
+                "recorded_packet": recorded_packet,
                 "output": snapshot,
             }
         }),
@@ -2365,6 +2705,7 @@ struct PaneOutputSnapshot {
     nonempty_line_count: usize,
     last_nonempty_line: Option<String>,
     tail_lines: Vec<String>,
+    agent_receipt: AgentReceiptSnapshot,
 }
 
 impl PaneOutputSnapshot {
@@ -2379,6 +2720,7 @@ impl PaneOutputSnapshot {
         let tail_start = nonempty_lines.len().saturating_sub(max_tail_lines);
         let tail_lines = nonempty_lines[tail_start..].to_vec();
         let last_nonempty_line = nonempty_lines.last().cloned();
+        let agent_receipt = AgentReceiptSnapshot::from_text(&text);
         Self {
             pane_id,
             text,
@@ -2386,6 +2728,41 @@ impl PaneOutputSnapshot {
             nonempty_line_count: nonempty_lines.len(),
             last_nonempty_line,
             tail_lines,
+            agent_receipt,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct AgentReceiptSnapshot {
+    ready: bool,
+    report_packet: bool,
+    markers: Vec<String>,
+}
+
+impl AgentReceiptSnapshot {
+    fn from_text(text: &str) -> Self {
+        let markers: Vec<String> = text
+            .lines()
+            .map(str::trim)
+            .filter(|line| {
+                line.contains("HERDR_AGENT_READY")
+                    || line.contains("HERDR_READY")
+                    || line.contains("HERDR_REPORT_PACKET")
+            })
+            .map(str::to_string)
+            .collect();
+        let ready = markers
+            .iter()
+            .any(|line| line.contains("HERDR_AGENT_READY") || line.contains("HERDR_READY"));
+        let report_packet = markers
+            .iter()
+            .any(|line| line.contains("HERDR_REPORT_PACKET"));
+
+        Self {
+            ready,
+            report_packet,
+            markers,
         }
     }
 }
@@ -3204,6 +3581,10 @@ fn mission_import_contract_prompt(
          \n\
          Required report packet:\n{report_rows}\n\
          \n\
+         Agent receipt markers:\n\
+         - First reply with HERDR_AGENT_READY: {title} once you have read this contract and are ready for parent messages.\n\
+         - When returning or updating a report packet, include HERDR_REPORT_PACKET: <done>/<required> above the packet.\n\
+         \n\
          Start inside this child pane. Use px if it is available on this system, stay inside the contract scope, and report blockers before widening scope.\n",
         title = contract.title,
         mode = contract.mode.label(),
@@ -3392,6 +3773,7 @@ fn sweep_child_pane(
     } else {
         None
     };
+    let report = merge_recorded_packet_report(&pane_id, report);
 
     Ok(MissionSweepPane {
         pane_id,
@@ -4267,13 +4649,28 @@ const INDEX_HTML: &str = r#"<!doctype html>
     body.terminal-expanded.pane-wall .surface {
       padding: 0;
     }
+    body:not([data-active-tab="panes"]) .runtime .live-mode-switch,
+    body:not([data-active-tab="panes"]) .runtime .drawer-switches,
+    body:not([data-active-tab="panes"]) .runtime .view-menu {
+      display: none;
+    }
+    body:not([data-active-tab="panes"]) .pane-command-deck,
+    body:not([data-active-tab="panes"]) .pane-roster,
+    body:not([data-active-tab="panes"]) .terminal-panel,
+    body:not([data-active-tab="panes"]) .wave-grid,
+    body:not([data-active-tab="panes"]) .live-command-strip {
+      display: none;
+    }
     body[data-active-tab="project"] .mission-strip,
+    body[data-active-tab="research"] .mission-strip,
     body[data-active-tab="panes"]:not(.pane-wall) .mission-strip,
     body[data-active-group="review"] .mission-strip {
       display: none;
     }
     body[data-active-tab="project"] .tree,
     body[data-active-tab="project"] .inspector,
+    body[data-active-tab="research"] .tree,
+    body[data-active-tab="research"] .inspector,
     body[data-active-group="review"] .tree,
     body[data-active-group="review"] .inspector {
       display: none;
@@ -5801,9 +6198,184 @@ const INDEX_HTML: &str = r#"<!doctype html>
 	    }
 	    .tab-page[data-page="panes"].active {
 	      position: relative;
-	      grid-template-rows: minmax(0, 1fr);
+	      grid-template-rows: auto minmax(0, 1fr);
 	      overflow: hidden;
 	    }
+    body:not(.pane-wall) .tab-page[data-page="panes"].active {
+      grid-template-rows: auto minmax(0, 1fr);
+    }
+    .project-start-panel,
+    .research-chat-panel {
+      display: grid;
+      gap: 16px;
+      min-width: 0;
+    }
+    .project-choice-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+      gap: 10px;
+      min-width: 0;
+    }
+    .project-choice-card {
+      min-width: 0;
+      border: 1px solid var(--line);
+      background: var(--panel);
+      color: var(--text);
+      border-radius: 8px;
+      padding: 14px;
+      text-align: left;
+      font: inherit;
+      cursor: pointer;
+    }
+    .project-choice-card:hover {
+      border-color: var(--line-strong);
+      background: var(--panel-2);
+    }
+    .project-choice-card strong {
+      display: block;
+      margin-bottom: 6px;
+    }
+    .project-choice-card span {
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.4;
+    }
+    .project-board {
+      display: grid;
+      grid-template-columns: repeat(6, minmax(190px, 1fr));
+      gap: 12px;
+      align-items: stretch;
+      overflow-x: auto;
+      padding-bottom: 6px;
+      min-width: 0;
+    }
+    .project-board-lane {
+      min-width: 190px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--panel);
+      display: grid;
+      grid-template-rows: auto minmax(120px, 1fr);
+    }
+    .project-board-lane header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 8px;
+      padding: 10px 12px;
+      border-bottom: 1px solid var(--line);
+    }
+    .project-board-list {
+      display: grid;
+      gap: 8px;
+      align-content: start;
+      padding: 10px;
+    }
+    .project-board-item,
+    .project-board-empty {
+      border: 1px solid rgba(148, 163, 184, 0.22);
+      border-radius: 8px;
+      background: rgba(15, 23, 42, 0.68);
+      padding: 10px;
+    }
+    .project-board-item {
+      display: grid;
+      gap: 8px;
+    }
+    .project-board-item > span,
+    .project-board-empty {
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.45;
+    }
+    .project-board-meta {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      align-items: center;
+    }
+    .research-room {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) minmax(260px, 320px);
+      gap: 16px;
+      min-height: 0;
+    }
+    .research-hero {
+      min-height: 320px;
+      display: grid;
+      place-items: center;
+      align-content: center;
+      gap: 16px;
+      text-align: center;
+    }
+    .research-hero h1 {
+      margin: 0;
+      font-size: 28px;
+      letter-spacing: 0;
+    }
+    .research-box {
+      width: min(760px, 100%);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--panel);
+      padding: 12px;
+      display: grid;
+      gap: 10px;
+      text-align: left;
+    }
+    .research-box textarea {
+      min-height: 96px;
+      resize: vertical;
+      border: 0;
+      outline: 0;
+      background: transparent;
+      color: var(--text);
+      font: inherit;
+    }
+    .research-box-actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      align-items: center;
+    }
+    .research-mode {
+      border: 1px solid var(--line);
+      background: rgba(148, 163, 184, 0.08);
+      color: var(--text);
+      border-radius: 999px;
+      padding: 8px 12px;
+      font: inherit;
+      cursor: pointer;
+    }
+    .research-mode.active {
+      border-color: var(--line-strong);
+      background: rgba(96, 165, 250, 0.18);
+    }
+    .research-source-panel,
+    .research-sidecar {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--panel);
+      padding: 14px;
+      display: grid;
+      gap: 10px;
+    }
+    .research-source-panel label {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      color: var(--muted);
+      font-size: 13px;
+    }
+    .research-results {
+      display: grid;
+      gap: 10px;
+    }
+    @media (max-width: 980px) {
+      .research-room {
+        grid-template-columns: 1fr;
+      }
+    }
 	    .live-command-strip {
 	      display: none;
 	      min-width: 0;
@@ -5816,7 +6388,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
 	      background: rgba(16, 23, 34, 0.96);
 	    }
 	    body:not(.pane-wall) .live-command-strip {
-	      display: none;
+	      display: flex;
 	    }
 	    body.pane-wall .live-command-strip {
 	      display: none;
@@ -5879,7 +6451,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
       display: grid;
     }
 	    body.show-command-deck.show-command-advanced .tab-page[data-page="panes"].active .pane-command-deck {
-	      max-height: min(620px, 72vh);
+	      max-height: min(520px, 54vh);
 	    }
     body.pane-wall .tab-page[data-page="panes"].active .pane-command-deck {
       display: none;
@@ -7502,13 +8074,14 @@ const INDEX_HTML: &str = r#"<!doctype html>
 	    }
   </style>
 </head>
-<body data-density="dense" data-active-tab="panes" data-active-group="panes" data-active-inspector-tab="pane">
+<body data-density="dense" data-active-tab="project" data-active-group="project" data-active-inspector-tab="pane">
   <div class="app-shell">
     <header class="topbar">
-      <div class="brand" id="brandLabel">Herdr Workroom</div>
-	      <nav class="tabs" aria-label="Mission tabs">
-	        <button class="tab" data-tab="project">Mission</button>
-	        <button class="tab active" data-tab="panes">Workbench</button>
+      <div class="brand" id="brandLabel">Herdr</div>
+	      <nav class="tabs" aria-label="Project rooms">
+	        <button class="tab active" data-tab="project">Board</button>
+	        <button class="tab" data-tab="research">Research</button>
+	        <button class="tab" data-tab="panes">Workbench</button>
 	        <button class="tab" data-tab="review">Review</button>
 	      </nav>
 	      <div class="runtime">
@@ -7586,12 +8159,12 @@ const INDEX_HTML: &str = r#"<!doctype html>
 	          <button class="review-tab" data-review-tab="audit">Audit</button>
 	          <button class="review-tab" data-review-tab="timeline">Timeline</button>
 	        </div>
-        <section class="tab-page active" data-page="panes">
-          <div class="live-command-strip" id="liveCommandStrip">
+        <section class="tab-page" data-page="panes">
+          <div class="live-command-strip" id="liveCommandStrip" title="mission decision rail, not a second dashboard">
             <div class="live-command-copy">
-              <span class="live-command-kicker">Parent command</span>
+              <span class="live-command-kicker">Parent decision</span>
               <strong id="liveCommandSummary">Loading parent decision state.</strong>
-              <span id="liveCommandMeta">Packets and sweep state will appear here.</span>
+              <span id="liveCommandMeta">Decision queue, packets, and receipts will appear here.</span>
             </div>
             <div class="live-command-actions" id="liveCommandActions"></div>
           </div>
@@ -7609,10 +8182,11 @@ const INDEX_HTML: &str = r#"<!doctype html>
                 <button class="deck-button" id="deckReadSelected">Read watched</button>
                 <button class="deck-button" id="deckRequestPackets">Request packets</button>
                 <button class="deck-button" id="deckAdvancedToggle" aria-pressed="false" title="Show child launch, inbox, packet queue, and change radar">Mission tools</button>
-                <button class="deck-button deck-advanced-action" id="deckStartChild">New wave pane</button>
+                <button class="deck-button deck-advanced-action" id="deckStartChild">New child pane</button>
                 <button class="deck-button deck-advanced-action" id="deckSweep">Sweep packets</button>
                 <button class="deck-button deck-advanced-action danger" id="deckStopSelected">Stop watched child</button>
                 <button class="deck-button primary deck-advanced-action" id="deckUnlockReady">Unlock ready</button>
+                <button class="deck-button" id="deckClose">Hide tray</button>
               </div>
             </div>
             <div class="deck-composer">
@@ -7722,40 +8296,88 @@ const INDEX_HTML: &str = r#"<!doctype html>
             </div>
           </section>
 		        </section>
-		        <section class="tab-page" data-page="project">
+		        <section class="tab-page active" data-page="project">
 		          <div class="mission-room">
 		            <div class="mission-room-head">
 		              <div>
-		                <div class="mission-kicker">Mission contract</div>
-		                <h1>Parent scope and dispatch contract</h1>
+		                <div class="mission-kicker">Project Home</div>
+		                <h1>What do you want to do with this project?</h1>
 		              </div>
 		              <div class="review-toolbar">
-		                <span id="missionSweepStatus">Sweep has not run in this view yet.</span>
-		                <button class="mini-action primary" data-radar-scan>Research next work</button>
-		                <button class="mini-action" id="missionRefreshSweep">Refresh sweep</button>
-		                <button class="mini-action" data-room-context-toggle aria-pressed="true" title="Show or hide the mission context rail">Context</button>
+		                <span id="missionSweepStatus">Project state has not been scanned in this view yet.</span>
+		                <button class="mini-action primary" data-room-jump="research">Scan project</button>
+		                <button class="mini-action" id="missionRefreshSweep">Refresh board</button>
+		                <button class="mini-action" data-room-context-toggle aria-pressed="true" title="Show or hide the project context rail">Context</button>
 		              </div>
 		            </div>
 		            <div class="mission-room-body">
 		              <div class="mission-main">
 		                <div class="mission-brief" id="missionBrief"></div>
-		                <div class="mission-state-room ops-grid" id="projectBoard"></div>
+		                <div class="mission-state-room ops-grid" id="projectBoard" aria-label="Inbox / Ideas Planned Running Needs Packet Parent Review Accepted"></div>
 		              </div>
 		              <aside class="mission-sidecar">
 		                <div>
 		                  <div class="mission-kicker">Mission lanes</div>
 		                  <h2>Parent contract lanes</h2>
-		                  <p>Mission is the contract surface. Keep goals, scope, child dispatch, and review gates here; jump to live panes only when terminal truth matters.</p>
+		                  <p>Use Board first, Research when the project is unclear, and Workbench only when live terminal truth matters.</p>
 		                </div>
 		                <div class="room-lane-actions">
-		                  <button class="room-lane-button" data-radar-scan>Research next work</button>
-		                  <button class="room-lane-button" data-room-jump="panes">Workbench</button>
-		                  <button class="room-lane-button" data-open-command-tray>Launch children</button>
-		                  <button class="room-lane-button" data-room-jump="review">Review</button>
-		                  <button class="room-lane-button" data-room-jump="evidence">Evidence</button>
+		                  <button class="room-lane-button" data-room-jump="panes">Continue work</button>
+		                  <button class="room-lane-button" data-room-jump="research">I have no clue where this project is at</button>
+		                  <button class="room-lane-button" data-open-command-tray>I have a plan</button>
+		                  <button class="room-lane-button" data-room-jump="research">Help me make a plan</button>
+		                  <button class="room-lane-button" data-room-jump="review">Review packets</button>
 		                </div>
 		              </aside>
 		            </div>
+		          </div>
+		        </section>
+		        <section class="tab-page" data-page="research">
+		          <div class="research-room">
+		            <div class="research-chat-panel">
+		              <div class="research-hero">
+		                <div class="mission-kicker">Research Room</div>
+		                <h1>What's going on in this project?</h1>
+		                <div class="research-box">
+		                  <textarea id="researchPrompt" spellcheck="false" placeholder="Ask what changed, what is risky, what should be planned, or what child panes to launch next."></textarea>
+		                  <div class="research-box-actions">
+		                    <button class="research-mode active" data-research-mode="summary">Summary</button>
+		                    <button class="research-mode" data-research-mode="code">Code</button>
+		                    <button class="research-mode" data-research-mode="design">Design</button>
+		                    <button class="research-mode" data-research-mode="research">Research</button>
+		                    <button class="research-mode" data-research-mode="inspired">Get Inspired</button>
+		                    <button class="research-mode" data-research-mode="deep">Think Deeply</button>
+		                    <button class="mini-action primary" id="researchRun">Scan project</button>
+		                  </div>
+		                </div>
+		              </div>
+		              <div class="research-source-panel">
+		                <div class="mission-kicker">Scan sources</div>
+		                <label><input type="checkbox" data-research-source="px" checked> px project scan</label>
+		                <label><input type="checkbox" data-research-source="git" checked disabled> git status</label>
+		                <label><input type="checkbox" data-research-source="recorder" checked disabled> mission recorder</label>
+		                <label><input type="checkbox" data-research-source="sessions" checked> .sessions files</label>
+		                <label><input type="checkbox" data-research-source="terminal"> terminal output fallback</label>
+		                <label><input type="checkbox" data-research-source="foxchat"> open FoxChat</label>
+		              </div>
+		              <div class="research-results" id="researchResults">
+		                <div class="empty-state">Run a project scan to compile research into mission cards.</div>
+		              </div>
+		            </div>
+		            <aside class="research-sidecar">
+		              <div>
+		                <div class="mission-kicker">Optional external lab</div>
+		                <h2>FoxChat</h2>
+		                <p>Use the local FoxFlow research chat when it is running. Herdr does not require it; mission records remain canonical here.</p>
+		              </div>
+		              <div class="room-lane-actions">
+		                <a class="room-lane-button" href="http://localhost:5100/chat?theme=dark" target="_blank" rel="noreferrer">Open FoxChat</a>
+		                <button class="room-lane-button" data-radar-scan>Run Herdr Radar</button>
+		                <button class="room-lane-button" data-radar-stage-draft>Stage mission cards</button>
+		                <button class="room-lane-button" data-radar-launch-draft>Launch child panes</button>
+		                <button class="room-lane-button" data-room-jump="project">Back to Board</button>
+		              </div>
+		            </aside>
 		          </div>
 		        </section>
 		        <section class="tab-page" data-page="review">
@@ -8040,7 +8662,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
   </div>
   <div class="wall-hud" id="wallHud" aria-live="polite">
     <div class="wall-hud-main">
-      <span class="wall-hud-kicker">Watching pane</span>
+      <span class="wall-hud-kicker">Parent decision</span>
       <strong class="wall-hud-title" id="wallHudTitle">No pane watched</strong>
       <span class="wall-hud-meta" id="wallHudMeta">Choose a live pane to watch or intervene.</span>
       <div class="wall-hud-context" id="wallHudContext"></div>
@@ -8079,6 +8701,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
     </div>
     <div class="wall-hud-actions">
       <button class="wall-hud-button" id="wallHudMessage">Intervene</button>
+      <button class="wall-hud-button" id="wallHudReview">Review decision</button>
       <button class="wall-hud-button" id="wallHudRead">Read output</button>
       <button class="wall-hud-button" id="wallHudSweep">Sweep mission</button>
       <button class="wall-hud-button" id="wallHudNewChild">New child</button>
@@ -8112,6 +8735,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
 	    let outputSnapshots = {};
 	    let outputEvents = [];
 	    let missionImportEvents = [];
+	    let missionRecordEvents = [];
 	    let lastMissionSweep = null;
 	    let workroomProjection = null;
 	    let evidenceLedger = [];
@@ -8119,9 +8743,12 @@ const INDEX_HTML: &str = r#"<!doctype html>
 		    let reviewRefreshInFlight = false;
 		    let parentPaneId = null;
 		    let selectedWaveId = null;
-		    let missionRadarItems = [];
+	    let missionRadarItems = [];
 		    let missionRadarScan = null;
 		    let missionRadarScanInFlight = false;
+	    let projectHomeProjection = null;
+	    let selectedResearchMode = 'summary';
+	    const researchSourcePrefsKey = 'herdr.desktop.research.sources';
 	    let focusSource = null;
     const tileSources = new Map();
     const latestFrames = new Map();
@@ -8309,10 +8936,11 @@ const INDEX_HTML: &str = r#"<!doctype html>
       const terminalNode = document.getElementById('wallHudTerminal');
       if (!title || !meta || !context || !packetNode || !terminalNode) return;
       const wave = waves[selectedWaveId];
+      const decision = parentDecisionState();
       if (!wave) {
-        title.textContent = 'No pane watched';
-        meta.textContent = 'Choose a live pane to watch or intervene.';
-        context.innerHTML = '<span class="wall-context-pill">select pane</span>';
+        title.textContent = decision.nextAction;
+        meta.textContent = `No pane watched; ${decision.meta}`;
+        context.innerHTML = `<span class="wall-context-pill ${decision.tone}">parent decision</span><span class="wall-context-pill">select pane</span>`;
         packetNode.textContent = 'packet n/a';
         terminalNode.textContent = 'no terminal attached';
         updateWallPulse();
@@ -8322,11 +8950,11 @@ const INDEX_HTML: &str = r#"<!doctype html>
       const packet = packetParts(wave);
       const missing = wave.role === 'parent' ? 0 : missingPacketFields(wave).length;
       const attention = attentionChip(wave);
-      title.textContent = `Watching ${wave.title}`;
+      title.textContent = decision.nextAction;
       meta.textContent = wave.role === 'parent'
-        ? `parent lane watching ${childWaves().length} child pane${childWaves().length === 1 ? '' : 's'}`
-        : `intervention lane - ${wave.mode} - ${wave.status} - ${attention.label}${missing ? ` - ${missing} packet field${missing === 1 ? '' : 's'} missing` : ''}`;
-      context.innerHTML = renderWallContext(wave);
+        ? `Watching ${wave.title}; parent lane watching ${childWaves().length} child pane${childWaves().length === 1 ? '' : 's'}`
+        : `Watching ${wave.title}; ${wave.mode} - ${wave.status} - ${attention.label}${missing ? ` - ${missing} packet field${missing === 1 ? '' : 's'} missing` : ''}`;
+      context.innerHTML = `<span class="wall-context-pill ${escapeHtml(decision.tone)}">parent decision</span>${renderWallContext(wave)}`;
       packetNode.textContent = wave.role === 'parent'
         ? `mission parent - ${childWaves().length} child panes`
         : `packet ${packet.done}/${packet.required} - blast ${wave.blast}`;
@@ -9031,6 +9659,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
 	      if (options.source === 'review') setReviewSweepStatus('Refreshing mission sweep...');
 	      try {
 	        const summary = await sweepMissionChildren({ ingest: options.ingest });
+	        await loadMissionRecordEvents().catch(() => {});
 	        await loadPanes(selectedWaveId);
 	        updateWallPulse(summary);
 	        if (options.source === 'mission') {
@@ -9191,6 +9820,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
 		      const payload = await response.json();
 		      if (!response.ok || payload.error) throw new Error(payload.error?.message || 'dispatch ledger failed');
 		      dispatchEvents = Array.isArray(payload.result?.dispatches) ? payload.result.dispatches : [];
+		      await loadMissionRecordEvents().catch(() => {});
 		      renderDispatchReceipts();
 		    }
 
@@ -9346,6 +9976,28 @@ const INDEX_HTML: &str = r#"<!doctype html>
 		        const action = wave ? selectButton(wave, 'inspect') : '';
 		        return `<div class="ops-row"><span><strong>${escapeHtml(receipt.at)} ${escapeHtml(receipt.title)}</strong><div class="ops-sub">${escapeHtml(receipt.detail || receipt.paneId || receipt.kind)}</div></span><span class="ops-pill ${escapeHtml(receipt.kind === 'error' ? 'warn' : 'good')}">${escapeHtml(receipt.kind)}</span><span>${action}</span></div>`;
 		      }).join('');
+		    }
+
+		    function missionRecordRows(limit = 12) {
+		      const rows = missionRecordEvents.slice(0, limit);
+		      if (!rows.length) return emptyRow('No recorder events stored yet.');
+		      return rows.map(event => {
+		        const paneId = event.pane_id || '';
+		        const wave = paneId ? waves[paneId] : null;
+		        const action = wave ? selectButton(wave, 'inspect') : '';
+		        const at = dispatchEventTime(event.created_at);
+		        const label = `${event.provider || 'generic'}/${event.kind || 'event'}`;
+		        return `<div class="ops-row"><span><strong>${escapeHtml(at)} ${escapeHtml(label)}</strong><div class="ops-sub">${escapeHtml(event.text || paneId || 'mission event')}</div></span><span class="ops-pill good">stored</span><span>${action}</span></div>`;
+		      }).join('');
+		    }
+
+		    async function loadMissionRecordEvents() {
+		      const response = await fetch('/mission/events?limit=50', { cache: 'no-store' });
+		      const payload = await response.json();
+		      if (!response.ok || payload.error) throw new Error(payload.error?.message || 'mission recorder failed');
+		      missionRecordEvents = Array.isArray(payload.result?.events)
+		        ? payload.result.events.slice().reverse()
+		        : [];
 		    }
 
 	    async function sweepWallMission() {
@@ -9516,13 +10168,25 @@ const INDEX_HTML: &str = r#"<!doctype html>
 		        : prompt;
 		    }
 
-		    function recordChildDispatch({ title, paneId, promptSent, argvText }) {
+		    function commandDispatchDetail(argvText, resolvedArgvText) {
+		      const requested = argvText || 'split pane';
+		      return resolvedArgvText && resolvedArgvText !== requested
+		        ? `${requested} -> resolved: ${resolvedArgvText}`
+		        : requested;
+		    }
+
+		    function recordChildDispatch({ title, paneId, promptSent, argvText, resolvedArgvText }) {
+		      const commandDetail = commandDispatchDetail(argvText, resolvedArgvText);
 		      recordEvidenceReceipt({
 		        kind: promptSent ? 'launch' : 'error',
 		        title: `Child launch: ${title}`,
 		        paneId,
-		        detail: `${promptSent ? 'brief sent' : 'brief not sent'}; ${argvText || 'split pane'}`,
-		        payload: { promptSent: Boolean(promptSent), argvText: argvText || 'split pane' }
+		        detail: `${promptSent ? 'brief sent' : 'brief not sent'}; ${commandDetail}`,
+		        payload: {
+		          promptSent: Boolean(promptSent),
+		          argvText: argvText || 'split pane',
+		          resolvedArgvText: resolvedArgvText || ''
+		        }
 		      });
 		      recordDispatch({
 		        target: `child dispatch: ${title}`,
@@ -9535,7 +10199,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
 		          error: promptSent ? undefined : 'start brief was not delivered'
 		        }]
 		      });
-		      const summary = `${title} -> ${paneId}; contract attached; ${promptSent ? 'brief sent' : 'brief not sent'}; ${argvText || 'split pane'}`;
+		      const summary = `${title} -> ${paneId}; contract attached; ${promptSent ? 'brief sent' : 'brief not sent'}; ${commandDetail}`;
 		      const childStatus = document.getElementById('childDispatchStatus');
 		      if (childStatus) childStatus.textContent = summary;
 		      const childSummary = document.getElementById('childDispatchSummary');
@@ -9577,9 +10241,11 @@ const INDEX_HTML: &str = r#"<!doctype html>
 		          const newPaneId = agentPayload.result?.start?.agent?.pane_id;
 		          if (!newPaneId) throw new Error('agent start did not return a pane id');
 		          const promptSent = Boolean(agentPayload.result?.prompt_sent);
+		          const resolvedArgvText = argvLabel(agentPayload.result?.resolved_argv);
 		          await loadPanes(newPaneId);
-		          recordChildDispatch({ title, paneId: newPaneId, promptSent, argvText });
-		          setChildDispatchStatus(`${status === 'queued' ? 'queued' : 'started'} ${title} in ${newPaneId}; contract attached; ${promptSent ? 'brief sent' : 'brief not sent'}`, source);
+		          recordChildDispatch({ title, paneId: newPaneId, promptSent, argvText, resolvedArgvText });
+		          const commandDetail = commandDispatchDetail(argvText, resolvedArgvText);
+		          setChildDispatchStatus(`${status === 'queued' ? 'queued' : 'started'} ${title} in ${newPaneId}; contract attached; ${promptSent ? 'brief sent' : 'brief not sent'}; ${commandDetail}`, source);
 		          return;
 		        }
 		        const splitResponse = await fetch(`/pane/split?pane_id=${encodeURIComponent(wave.paneId)}&direction=${encodeURIComponent(direction)}&focus=true`, { cache: 'no-store' });
@@ -9590,7 +10256,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
 		        await attachPaneContract(newPaneId, title, mode, brief, status);
 		        await sendTextToPane(newPaneId, `${shellSafeHeredocPrompt(startPrompt)}\r`);
 		        await loadPanes(newPaneId);
-		        recordChildDispatch({ title, paneId: newPaneId, promptSent: true, argvText: 'split pane' });
+		        recordChildDispatch({ title, paneId: newPaneId, promptSent: true, argvText: 'split pane', resolvedArgvText: '' });
 		        setChildDispatchStatus(`${status === 'queued' ? 'queued' : 'created'} ${title} in ${newPaneId}; contract attached; brief sent`, source);
 		      } catch (error) {
 		        setChildDispatchStatus(error.message || 'start failed', source);
@@ -10298,10 +10964,11 @@ const INDEX_HTML: &str = r#"<!doctype html>
 		        const sweep = sweepPaneFor(wave);
 		        const snapshot = outputSnapshotForWave(wave);
 		        const dispatch = dispatchReceiptForWave(wave);
+		        const receiptLabel = agentReceiptLabel(snapshot || sweep?.output);
 		        const outputLabel = snapshot
-		          ? `read ${snapshot.nonempty_line_count || 0} lines ${snapshot.at || ''}`.trim()
+		          ? `${receiptLabel ? `${receiptLabel}; ` : ''}read ${snapshot.nonempty_line_count || 0} lines ${snapshot.at || ''}`.trim()
 		          : sweep?.output
-		            ? `${sweep.output.nonempty_line_count || 0} lines`
+		            ? `${receiptLabel ? `${receiptLabel}; ` : ''}${sweep.output.nonempty_line_count || 0} lines`
 		            : wave.status;
 		        const commsLabel = dispatch
 		          ? `${dispatch.receipt.ok ? 'parent msg ok' : 'parent msg failed'} ${dispatch.event.at}`
@@ -10484,11 +11151,23 @@ const INDEX_HTML: &str = r#"<!doctype html>
 	        'Tool policy:',
 	        'Use px for repo/context checks if it is available on this system. If px is missing, continue with normal shell inspection and mention that in the report.',
 	        '',
+	        'Agent receipt:',
+	        `First reply with HERDR_AGENT_READY: ${title} once you have read this contract and are ready for parent messages.`,
+	        'When returning or updating a report packet, include HERDR_REPORT_PACKET: <done>/<required> above the packet so the parent can ingest the receipt.',
+	        '',
 	        'Required report packet:',
 	        packetFields.map((field, index) => `${index + 1}. ${field}`).join('\n'),
 	        '',
 	        'Before claiming done, report evidence/receipts, files read, files changed, commands run, risks, good/bad/ugly, recommendation, and next wave suggestion.'
 	      ].join('\n');
+	    }
+
+	    function agentReceiptLabel(snapshot) {
+	      const receipt = snapshot?.agent_receipt || snapshot?.agentReceipt;
+	      if (!receipt) return '';
+	      if (receipt.report_packet) return 'agent packet marker';
+	      if (receipt.ready) return 'agent ready';
+	      return '';
 	    }
 
 	    function paneTitle(pane, contract, index) {
@@ -10636,10 +11315,13 @@ const INDEX_HTML: &str = r#"<!doctype html>
 	        const gateClass = isParent ? 'good' : dependencyGateTone(gate.status);
 	        const sweep = sweepPaneFor(wave);
 	        const snapshot = outputSnapshotForWave(wave);
+	        const receiptLabel = agentReceiptLabel(snapshot || sweep?.output);
 	        const dispatch = dispatchReceiptForWave(wave);
 		        const outputLabel = isParent
 		          ? 'parent control'
-		          : (snapshot
+		          : (receiptLabel
+		            ? receiptLabel
+		            : snapshot
 		            ? `read ${snapshot.nonempty_line_count || 0} ${snapshot.at || ''}`.trim()
 		            : (sweep?.output ? `${sweep.output.nonempty_line_count || 0} lines read` : 'not read yet'));
 		        const dispatchLabel = isParent
@@ -10896,6 +11578,57 @@ const INDEX_HTML: &str = r#"<!doctype html>
 	      return label || 'parent attention needed';
 	    }
 
+	    function parentDecisionState(input = {}) {
+	      const list = input.list ?? childWaves();
+	      const contracts = input.contracts ?? list.filter(wave => wave.pane.wave_contract);
+	      const readyPackets = input.readyPackets ?? contracts.filter(wave => !missingPacketFields(wave).length);
+	      const attention = input.attention ?? attentionInboxItems();
+	      const readyForAcceptance = input.readyForAcceptance ?? packetReviewItems();
+	      const blockedGates = input.blockedGates ?? contracts
+	        .map(wave => ({ wave, gate: dependencyGateForWave(wave) }))
+	        .filter(item => item.gate.status !== 'ready');
+	      const primaryChanges = input.primaryChanges ?? allGitEntries().filter(entry => !localOnlyPath(entry.path));
+	      const nextAction = attention.length
+	        ? `Check ${attention[0].wave.title}: ${liveDecisionLabel(attention[0].reason)}`
+	        : readyForAcceptance.length
+	          ? `Accept or reject ${readyForAcceptance[0].title}`
+	          : blockedGates.length
+	            ? `Resolve ${blockedGates[0].wave.title} gate`
+	            : primaryChanges.length
+	              ? 'Review changed files'
+	              : list.length
+	                ? 'No parent decision needed'
+	                : 'Create child panes';
+	      const decisionCount = attention.length + readyForAcceptance.length + blockedGates.length;
+	      const tone = decisionCount ? 'warn' : primaryChanges.length ? 'warn' : 'good';
+	      const packetText = contracts.length
+	        ? `${readyPackets.length}/${contracts.length} packet${contracts.length === 1 ? '' : 's'} complete`
+	        : 'no child contracts yet';
+	      const blockerText = attention.length
+	        ? `${attention.length} report issue${attention.length === 1 ? '' : 's'}`
+	        : 'no report issues';
+	      const acceptanceText = readyForAcceptance.length
+	        ? `${readyForAcceptance.length} packet${readyForAcceptance.length === 1 ? '' : 's'} ready`
+	        : 'no packets ready';
+	      const gateText = blockedGates.length
+	        ? `${blockedGates.length} gate${blockedGates.length === 1 ? '' : 's'} blocked`
+	        : 'no blocked gates';
+	      const changeText = `${primaryChanges.length} shared checkout change${primaryChanges.length === 1 ? '' : 's'}`;
+	      return {
+	        list,
+	        contracts,
+	        readyPackets,
+	        attention,
+	        readyForAcceptance,
+	        blockedGates,
+	        primaryChanges,
+	        nextAction,
+	        decisionCount,
+	        tone,
+	        meta: `${packetText}; ${blockerText}; ${acceptanceText}; ${gateText}; ${changeText}.`
+	      };
+	    }
+
 	    function renderLiveCommandStrip({
 	      attention,
 	      readyForAcceptance,
@@ -10909,19 +11642,15 @@ const INDEX_HTML: &str = r#"<!doctype html>
 	      const meta = document.getElementById('liveCommandMeta');
 	      const actions = document.getElementById('liveCommandActions');
 	      if (!summary || !meta || !actions) return;
-	      const decisionCount = attention.length + readyForAcceptance.length;
-	      const packetText = contracts.length
-	        ? `${readyPackets.length}/${contracts.length} packet${contracts.length === 1 ? '' : 's'} complete`
-	        : 'no child contracts yet';
-	      const blockerText = attention.length
-	        ? `${attention.length} sweep blocker${attention.length === 1 ? '' : 's'}`
-	        : 'no sweep blockers';
-	      const acceptanceText = readyForAcceptance.length
-	        ? `${readyForAcceptance.length} acceptance review${readyForAcceptance.length === 1 ? '' : 's'}`
-	        : 'no acceptance reviews';
-	      const changeText = `${primaryChanges.length} shared checkout changed file${primaryChanges.length === 1 ? '' : 's'}`;
+	      const decision = parentDecisionState({
+	        attention,
+	        readyForAcceptance,
+	        contracts,
+	        readyPackets,
+	        primaryChanges
+	      });
 	      summary.textContent = nextAction;
-	      meta.textContent = `${packetText}; ${blockerText}; ${acceptanceText}; ${changeText}.`;
+	      meta.textContent = decision.meta;
 	      actions.innerHTML = `${actionControls} ${roomJumpButton('review', 'open review')} ${roomJumpButton('audit', 'audit gates')}`;
 	    }
 
@@ -11073,6 +11802,146 @@ const INDEX_HTML: &str = r#"<!doctype html>
 		        `;
 			      }).join('');
 			      return `<section class="ops-card wide"><div class="ops-kicker">Mission Board</div><h3>Pane lifecycle lanes</h3><div class="mission-lifecycle-board" aria-label="Mission Board">${lanes}</div></section>`;
+			    }
+
+			    async function loadProjectHome() {
+			      const params = new URLSearchParams();
+			      if (selectedWaveId) params.set('selected_pane_id', selectedWaveId);
+			      const response = await fetch(`/project/home?${params.toString()}`, { cache: 'no-store' });
+			      const payload = await response.json();
+			      if (!response.ok || payload.error) throw new Error(payload.error?.message || 'project home failed');
+			      projectHomeProjection = payload.result?.project_home || null;
+			      if (payload.result?.workroom) workroomProjection = payload.result.workroom;
+			      renderProjectHome();
+			      renderResearchRoom();
+			    }
+
+			    function renderProjectHome() {
+			      const brief = document.getElementById('missionBrief');
+			      const board = document.getElementById('projectBoard');
+			      if (!brief || !board) return;
+			      const home = projectHomeProjection;
+			      if (!home) {
+			        brief.innerHTML = '<div class="ops-card"><strong>Project Home</strong><p>Loading project state.</p></div>';
+			        board.innerHTML = '<div class="empty-state">Loading board.</div>';
+			        return;
+			      }
+			      const next = home.next_action || {};
+			      brief.innerHTML = `
+			        <div class="project-start-panel">
+			          <div class="ops-card">
+			            <div class="mission-kicker">Next parent decision</div>
+			            <h2>${escapeHtml(next.title || 'Start this project')}</h2>
+			            <p>${escapeHtml(next.detail || 'Choose how to enter the project.')}</p>
+			            <button class="mini-action primary" data-room-jump="${escapeHtml(next.target_room || 'research')}">${escapeHtml(next.primary_action || 'Open research')}</button>
+			          </div>
+			          <div class="project-choice-grid">
+			            ${projectChoiceCard('Open project', 'Choose an existing local repo.', 'research')}
+			            ${projectChoiceCard('Clone project', 'Bring a repo into Herdr, then scan it.', 'research')}
+			            ${projectChoiceCard('Create project', 'Start a fresh workroom.', 'research')}
+			            ${projectChoiceCard('Attach Herdr session', 'Use an already-running Herdr server/session.', 'panes')}
+			          </div>
+			          <div class="project-choice-grid">
+			            ${projectChoiceCard('Continue work', 'Open the live panes and current child sessions.', 'panes')}
+			            ${projectChoiceCard('I have no clue where this project is at', 'Run a research scan with receipts.', 'research')}
+			            ${projectChoiceCard('I have a plan', 'Import a session file or launch child panes.', '', 'data-open-command-tray')}
+			            ${projectChoiceCard('Help me make a plan', 'Research, compile candidates, then stage a mission.', 'research')}
+			          </div>
+			        </div>
+			      `;
+			      renderMissionBoard(home.board);
+			      bindWaveInteractions();
+			    }
+
+			    function projectChoiceCard(title, detail, room, extraAttr = '') {
+			      const roomAttr = room ? `data-room-jump="${escapeHtml(room)}"` : '';
+			      return `
+			        <button class="project-choice-card" ${roomAttr} ${extraAttr}>
+			          <strong>${escapeHtml(title)}</strong>
+			          <span>${escapeHtml(detail)}</span>
+			        </button>
+			      `;
+			    }
+
+			    function renderMissionBoard(board) {
+			      const container = document.getElementById('projectBoard');
+			      if (!container) return;
+			      const lanes = Array.isArray(board?.lanes) ? board.lanes : [];
+			      container.className = 'mission-state-room project-board-wrap';
+			      if (!lanes.length) {
+			        container.innerHTML = '<div class="empty-state">No board lanes yet.</div>';
+			        return;
+			      }
+			      container.innerHTML = `
+			        <div class="project-board">
+			          ${lanes.map(lane => `
+			            <section class="project-board-lane" data-board-lane="${escapeHtml(lane.id)}">
+			              <header>
+			                <strong>${escapeHtml(lane.title)}</strong>
+			                <span class="ops-pill">${escapeHtml((lane.items || []).length)}</span>
+			              </header>
+			              <div class="project-board-list">
+			                ${(lane.items || []).length ? lane.items.map(item => missionBoardItem(item)).join('') : `<div class="project-board-empty">${escapeHtml(lane.empty || 'No items.')}</div>`}
+			              </div>
+			            </section>
+			          `).join('')}
+			        </div>
+			      `;
+			    }
+
+			    function missionBoardItem(item) {
+			      return `
+			        <article class="project-board-item" data-wave="${escapeHtml(item.pane_id)}">
+			          <strong>${escapeHtml(item.title)}</strong>
+			          <span>${escapeHtml(item.detail || '')}</span>
+			          <div class="project-board-meta">
+			            <span class="ops-pill">${escapeHtml(item.status || 'unknown')}</span>
+			            <span class="ops-pill">${escapeHtml(item.packet || '0/10')}</span>
+			            <button class="mini-action" data-board-action="${escapeHtml(item.action || 'inspect')}" data-wave="${escapeHtml(item.pane_id)}">${escapeHtml(item.action || 'inspect')}</button>
+			          </div>
+			        </article>
+			      `;
+			    }
+
+			    function researchSources() {
+			      return [...document.querySelectorAll('[data-research-source]')].map(input => ({
+			        id: input.dataset.researchSource,
+			        checked: input.checked,
+			        required: input.disabled
+			      }));
+			    }
+
+			    function renderResearchRoom() {
+			      const home = projectHomeProjection;
+			      const prompt = document.getElementById('researchPrompt');
+			      if (prompt && !prompt.value && home?.research?.prompt_placeholder) {
+			        prompt.placeholder = home.research.prompt_placeholder;
+			      }
+			      document.querySelectorAll('[data-research-mode]').forEach(button => {
+			        button.classList.toggle('active', button.dataset.researchMode === selectedResearchMode);
+			      });
+			      const results = document.getElementById('researchResults');
+			      if (!results) return;
+			      const items = scannedMissionRadarItems();
+			      if (!items.length) {
+			        results.innerHTML = '<div class="empty-state">Run a project scan to compile research into mission cards.</div>';
+			        return;
+			      }
+			      results.innerHTML = [
+			        renderProjectRadarCard(items),
+			        renderMissionDraftCard(items)
+			      ].join('');
+			      bindWaveInteractions();
+			    }
+
+			    async function runResearchScan() {
+			      const foxchat = researchSources().find(source => source.id === 'foxchat')?.checked;
+			      if (foxchat) {
+			        window.open('http://localhost:5100/chat?theme=dark', '_blank', 'noreferrer');
+			      }
+			      await scanMissionRadar();
+			      renderResearchRoom();
+			      setActiveTab('research');
 			    }
 
 			    function radarBrief(title, goal, bullets) {
@@ -11681,6 +12550,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
 			      } finally {
 			        missionRadarScanInFlight = false;
 			        renderDerivedBoards();
+			        renderResearchRoom();
 			        bindWaveInteractions();
 			      }
 			    }
@@ -11854,23 +12724,24 @@ const INDEX_HTML: &str = r#"<!doctype html>
 			        localMissionRadarItems
 			      );
 
-	      projectBoard.className = 'mission-state-room ops-grid';
+	      if (!projectHomeProjection) {
+	        projectBoard.className = 'mission-state-room ops-grid';
+	      }
 	      evidenceBoard.className = 'ops-grid';
 	      changesBoard.className = 'ops-grid';
 	      auditBoard.className = 'ops-grid';
 	      timelineBoard.className = 'ops-grid';
 
-	      const nextAction = attention.length
-	        ? `Check ${attention[0].wave.title}: ${liveDecisionLabel(attention[0].reason)}`
-	        : readyForAcceptance.length
-	          ? `Accept or reject ${readyForAcceptance[0].title}`
-	          : blockedGates.length
-	            ? `Resolve ${blockedGates[0].wave.title} gate`
-	            : primaryChanges.length
-	              ? 'Review changed files'
-	              : list.length
-	                ? 'Mission review is clear'
-	                : 'Create child panes';
+	      const parentDecision = parentDecisionState({
+	        list,
+	        contracts,
+	        readyPackets,
+	        attention,
+	        readyForAcceptance,
+	        blockedGates,
+	        primaryChanges
+	      });
+	      const nextAction = parentDecision.nextAction;
 	      const nextActionControls = attention.length
 	        ? `${selectButton(attention[0].wave)} ${readButton(attention[0].wave)} ${missingButton(attention[0].wave, 'deck')}`
 	        : readyForAcceptance.length
@@ -11976,18 +12847,24 @@ const INDEX_HTML: &str = r#"<!doctype html>
 		        `<div class="ops-row"><span><strong>Repo evidence</strong><div class="ops-sub">${primaryChanges.length} changed file${primaryChanges.length === 1 ? '' : 's'} visible from git${gitBranches.length ? ` on ${gitBranches.join(', ')}` : ''}.</div></span><span class="ops-pill ${primaryChanges.length ? 'warn' : 'good'}">${primaryChanges.length}</span><span></span></div>`,
 		        `<div class="ops-row"><span><strong>Modes</strong><div class="ops-sub">${modeSummary || 'No child modes available yet.'}</div></span><span class="ops-pill">${writeCapable.length} write-capable</span><span></span></div>`
 		      ].join('');
-			      projectBoard.innerHTML = [
-			        renderMissionDraftCard(missionRadarItems),
-			        renderProjectRadarCard(missionRadarItems),
-			        renderMissionLifecycleBoard(list),
-			        opsCard('Mission state', 'Parent and child pane queue', dispatchRows, true),
-			        opsCard('Parent decisions', 'Local review queue', attentionRows),
-			        opsCard('Governor', 'Scope and packet gates', governanceRows)
-			      ].join('');
+			      if (projectHomeProjection) {
+			        renderProjectHome();
+			      } else {
+			        projectBoard.innerHTML = [
+			          renderMissionDraftCard(missionRadarItems),
+			          renderProjectRadarCard(missionRadarItems),
+			          renderMissionLifecycleBoard(list),
+			          opsCard('Mission state', 'Parent and child pane queue', dispatchRows, true),
+			          opsCard('Parent decisions', 'Local review queue', attentionRows),
+			          opsCard('Governor', 'Scope and packet gates', governanceRows)
+			        ].join('');
+			      }
 
 		      const proofReceiptRows = evidenceLedgerRows(12);
+		      const missionRecorderRows = missionRecordRows(12);
 		      evidenceBoard.innerHTML = [
 		        opsCard('Proof receipts', 'Launch, read, packet, sweep, and parent verdict receipts', proofReceiptRows, true),
+		        opsCard('Mission recorder', 'SQLite + project .sessions event trail', missionRecorderRows, true),
 		        list.length ? opsCard('Claims', 'Child evidence ledger', list.map(wave => {
 		          const done = donePacketFields(wave);
 		          const claim = wave.pane.wave_contract ? wave.arcs : 'No contract attached yet';
@@ -12064,17 +12941,20 @@ const INDEX_HTML: &str = r#"<!doctype html>
 			          return `<div class="ops-row"><span><strong>${escapeHtml(event.at)} ${escapeHtml(basename(event.path) || 'session file')}</strong><div class="ops-sub">${escapeHtml(assignmentSummary)}</div></span><span class="ops-pill ${event.missing ? 'warn' : 'good'}">${escapeHtml(pill)}</span><span></span></div>`;
 			        }).join('')
 			        : emptyRow('No mission session imports yet.');
+			      const missionRecorderTimelineRows = missionRecordRows(20);
 			      timelineBoard.innerHTML = allPanes.length ? [
 			        opsCard('Timeline', 'Current pane lifecycle', allPanes.map((wave, index) => {
 			        const focus = wave.pane.focused ? 'focused now' : 'background';
 			        return paneOpsRow(wave, `${index + 1}. ${focus}; ${wave.terminal}; packet ${wave.packetLabel}`, selectButton(wave));
 			      }).join(''), true),
+			        opsCard('Recorder events', 'SQLite-backed mission record', missionRecorderTimelineRows, true),
 			        opsCard('Mission imports', 'Session files applied to panes', importRows, true),
 			        opsCard('Proof receipts', 'Runtime proof trail', proofReceiptRows, true),
 			        opsCard('Dispatch receipts', 'Parent-to-child messages', dispatchReceiptRows, true),
 			        opsCard('Read snapshots', 'Parent-read child output', outputRows, true)
 			      ].join('') : [
 			        opsCard('Timeline', 'Current pane lifecycle', emptyRow('Pane lifecycle events will appear once the mission has panes.'), true),
+			        opsCard('Recorder events', 'SQLite-backed mission record', missionRecorderTimelineRows, true),
 			        opsCard('Proof receipts', 'Runtime proof trail', proofReceiptRows, true)
 			      ].join('');
 			    }
@@ -12117,11 +12997,11 @@ const INDEX_HTML: &str = r#"<!doctype html>
           openExpandedPane(node.dataset.wave);
         });
       });
-      document.querySelectorAll('[data-mission-lane-toggle]').forEach(button => {
-        if (button.dataset.bound === '1') return;
-        button.dataset.bound = '1';
-        button.addEventListener('click', event => {
-          event.stopPropagation();
+	      document.querySelectorAll('[data-mission-lane-toggle]').forEach(button => {
+	        if (button.dataset.bound === '1') return;
+	        button.dataset.bound = '1';
+	        button.addEventListener('click', event => {
+	          event.stopPropagation();
           setMissionBoardLaneCollapsed(
             button.dataset.missionLaneToggle,
             button.getAttribute('aria-expanded') === 'true'
@@ -12146,6 +13026,28 @@ const INDEX_HTML: &str = r#"<!doctype html>
 	          openExpandedPane(node.dataset.wave);
 	        });
 	      });
+	      document.querySelectorAll('[data-research-mode]').forEach(button => {
+	        if (button.dataset.bound === '1') return;
+	        button.dataset.bound = '1';
+	        button.addEventListener('click', event => {
+	          event.stopPropagation();
+	          selectedResearchMode = button.dataset.researchMode || 'summary';
+	          renderResearchRoom();
+	        });
+	      });
+	      const researchRun = document.getElementById('researchRun');
+	      if (researchRun && researchRun.dataset.bound !== '1') {
+	        researchRun.dataset.bound = '1';
+	        researchRun.addEventListener('click', event => {
+	          event.stopPropagation();
+	          runResearchScan().catch(error => {
+	            const results = document.getElementById('researchResults');
+	            if (results) {
+	              results.innerHTML = `<div class="empty-state">Research scan failed: ${escapeHtml(error.message || 'unknown error')}</div>`;
+	            }
+	          });
+	        });
+	      }
 	      document.querySelectorAll('[data-radar-stage]').forEach(button => {
 	        if (button.dataset.bound === '1') return;
 	        button.dataset.bound = '1';
@@ -12274,6 +13176,25 @@ const INDEX_HTML: &str = r#"<!doctype html>
           closePane(button.dataset.closeWave);
         });
       });
+	      document.querySelectorAll('[data-board-action]').forEach(button => {
+	        if (button.dataset.bound === '1') return;
+	        button.dataset.bound = '1';
+	        button.addEventListener('click', event => {
+	          event.stopPropagation();
+	          const paneId = button.dataset.wave;
+	          if (paneId && waves[paneId]) selectWave(paneId, { reconnect: false });
+	          const action = button.dataset.boardAction || '';
+	          if (action.includes('review') || action.includes('packet')) {
+	            setActiveTab('review');
+	          } else if (action.includes('evidence')) {
+	            setActiveTab('evidence');
+	          } else if (action.includes('research')) {
+	            setActiveTab('research');
+	          } else {
+	            setActiveTab('panes');
+	          }
+	        });
+	      });
 	      document.querySelectorAll('[data-file-receipt]').forEach(button => {
 	        if (button.dataset.bound === '1') return;
 	        button.dataset.bound = '1';
@@ -12297,6 +13218,9 @@ const INDEX_HTML: &str = r#"<!doctype html>
           event.stopPropagation();
           setActiveTab('panes');
           setCommandDeckVisible(true);
+          setChromeToggle('show-command-advanced', 'deckAdvancedToggle', viewPreferenceKeys.commandAdvanced, true, { persist: false });
+          const launch = document.getElementById('missionLaunch') || document.getElementById('childDispatch');
+          if (launch) launch.scrollIntoView({ block: 'nearest' });
         });
       });
 	    }
@@ -12366,6 +13290,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
       document.querySelectorAll('.tab-page').forEach(node => node.classList.toggle('active', node.dataset.page === targetTab));
       updateReviewTabs(targetTab);
       if (targetTab === 'project') refreshMissionRoom({ quiet: true });
+      if (targetTab === 'research') renderResearchRoom();
       if (targetTab === 'review') refreshReviewRoom({ quiet: true });
       if (targetTab === 'panes' && selectedWaveId) setTimeout(() => reconnectStreamsForSelection(), 80);
     }
@@ -12529,7 +13454,18 @@ const INDEX_HTML: &str = r#"<!doctype html>
 	      };
 	      sync('treeQuickToggle', !document.body.classList.contains('hide-tree'));
 	      sync('detailsQuickToggle', !document.body.classList.contains('hide-inspector'));
-	      sync('commandQuickToggle', document.body.classList.contains('show-command-deck'));
+	      const pressed = document.body.classList.contains('show-command-deck');
+	      sync('commandQuickToggle', pressed);
+	      const button = document.getElementById('commandQuickToggle');
+	      if (button) {
+	        button.textContent = pressed ? 'Hide command' : 'Command';
+	        button.title = pressed ? 'Hide parent command tray' : 'Show parent command tray';
+	      }
+	      const menuButton = document.getElementById('controlsToggle');
+	      if (menuButton) {
+	        menuButton.textContent = pressed ? 'Hide parent tray' : 'Parent tray';
+	        menuButton.title = pressed ? 'Hide parent command tray' : 'Show parent intervention tray';
+	      }
 	    }
 
     function openExpandedPane(id) {
@@ -12670,6 +13606,10 @@ const INDEX_HTML: &str = r#"<!doctype html>
 	      renderPacketReviewQueue();
 	      renderChangeRadar();
 	      renderDerivedBoards();
+	      await loadProjectHome().catch(error => {
+	        console.warn('project home failed', error);
+	        renderProjectHome();
+	      });
 	      bindWaveInteractions();
       if (selectedWaveId) {
         selectWave(selectedWaveId, { reconnect: false });
@@ -12831,8 +13771,11 @@ const INDEX_HTML: &str = r#"<!doctype html>
 	    document.getElementById('inspectorAdvancedToggle').addEventListener('click', () => {
 	      toggleChrome('show-inspector-advanced', 'inspectorAdvancedToggle', viewPreferenceKeys.inspectorAdvanced, { persist: false });
 	    });
-	    document.getElementById('deckAdvancedToggle').addEventListener('click', () => {
-	      toggleChrome('show-command-advanced', 'deckAdvancedToggle', viewPreferenceKeys.commandAdvanced, { persist: false });
+		    document.getElementById('deckAdvancedToggle').addEventListener('click', () => {
+		      toggleChrome('show-command-advanced', 'deckAdvancedToggle', viewPreferenceKeys.commandAdvanced, { persist: false });
+	    });
+	    document.getElementById('deckClose').addEventListener('click', () => {
+	      setCommandDeckVisible(false);
 	    });
 	    document.querySelectorAll('.mission-node[data-toggle]').forEach(node => {
 	      node.addEventListener('click', () => toggleTree(node.dataset.toggle));
@@ -12846,6 +13789,10 @@ const INDEX_HTML: &str = r#"<!doctype html>
 		    document.getElementById('wallHudMessage').addEventListener('click', event => {
 		      event.stopPropagation();
 		      loadPaneMessagePrompt(selectedWaveId, 'wall');
+		    });
+		    document.getElementById('wallHudReview').addEventListener('click', event => {
+		      event.stopPropagation();
+		      setActiveTab('review');
 		    });
 		    document.getElementById('wallHudRead').addEventListener('click', event => {
 		      event.stopPropagation();
@@ -13048,9 +13995,58 @@ mod tests {
     }
 
     #[test]
-    fn desktop_shell_groups_review_surfaces_under_three_primary_tabs() {
-        assert_eq!(INDEX_HTML.matches("data-tab=\"").count(), 3);
-        assert!(INDEX_HTML.contains("data-tab=\"project\">Mission"));
+    fn recorded_packet_overlay_updates_pane_contract_report() {
+        let mut fields = serde_json::Map::new();
+        fields.insert("What I did".into(), serde_json::json!("recorded"));
+        fields.insert("Evidence / receipts".into(), serde_json::json!("sqlite"));
+        let packet = crate::mission_record::MissionPacket {
+            mission_id: 1,
+            pane_id: "pane-1".into(),
+            fields,
+            completed_fields: 2,
+            ready: true,
+            audit_score: None,
+            audit_verdict: None,
+            updated_at: "now".into(),
+        };
+        let mut pane = serde_json::json!({
+            "pane_id": "pane-1",
+            "wave_contract": {
+                "title": "Child",
+                "report": {
+                    "completed_fields": 0,
+                    "required_fields": 10,
+                    "completed_items": []
+                }
+            }
+        });
+
+        assert!(merge_recorded_packet_into_pane_value(&mut pane, &packet));
+
+        let report = pane.pointer("/wave_contract/report").unwrap();
+        assert_eq!(
+            report
+                .pointer("/completed_fields")
+                .and_then(serde_json::Value::as_u64),
+            Some(2)
+        );
+        assert_eq!(
+            report
+                .pointer("/completed_items")
+                .and_then(serde_json::Value::as_array)
+                .map(|items| items
+                    .iter()
+                    .filter_map(serde_json::Value::as_str)
+                    .collect::<Vec<_>>()),
+            Some(vec!["What I did", "Evidence / receipts"])
+        );
+    }
+
+    #[test]
+    fn desktop_shell_groups_review_surfaces_under_primary_rooms() {
+        assert_eq!(INDEX_HTML.matches("data-tab=\"").count(), 4);
+        assert!(INDEX_HTML.contains("data-tab=\"project\">Board"));
+        assert!(INDEX_HTML.contains("data-tab=\"research\">Research"));
         assert!(INDEX_HTML.contains("data-tab=\"panes\">Workbench"));
         assert!(!INDEX_HTML.contains("data-tab=\"panes\">Panes"));
         assert!(!INDEX_HTML.contains("data-tab=\"panes\">Live Panes"));
@@ -13506,8 +14502,35 @@ mod tests {
     }
 
     #[test]
+    fn desktop_exposes_project_home_projection_route() {
+        let route_source = include_str!("desktop.rs");
+
+        assert!(route_source.contains("\"/project/home\" => handle_project_home(stream, query)"));
+        assert!(route_source.contains("fn handle_project_home("));
+        assert!(route_source.contains("project_home_model::ProjectHomeView::from_workroom"));
+    }
+
+    #[test]
+    fn desktop_shell_routes_and_renders_mission_recorder_events() {
+        let route_source = include_str!("desktop.rs");
+
+        assert!(
+            route_source.contains("\"/mission/events\" => handle_mission_events(stream, query)")
+        );
+        assert!(route_source.contains("fn handle_mission_events"));
+        assert!(INDEX_HTML.contains("let missionRecordEvents = [];"));
+        assert!(INDEX_HTML.contains("function loadMissionRecordEvents()"));
+        assert!(INDEX_HTML.contains("fetch('/mission/events?limit=50'"));
+        assert!(INDEX_HTML.contains("function missionRecordRows(limit = 12)"));
+        assert!(INDEX_HTML.contains("await loadMissionRecordEvents().catch(() => {})"));
+        assert!(INDEX_HTML.contains("opsCard('Mission recorder'"));
+        assert!(INDEX_HTML.contains("opsCard('Recorder events'"));
+    }
+
+    #[test]
     fn desktop_shell_keeps_existing_workbench_and_review_sidecar_systems() {
-        assert!(INDEX_HTML.contains("data-tab=\"project\">Mission</button>"));
+        assert!(INDEX_HTML.contains("data-tab=\"project\">Board</button>"));
+        assert!(INDEX_HTML.contains("data-tab=\"research\">Research</button>"));
         assert!(INDEX_HTML.contains("data-tab=\"panes\">Workbench</button>"));
         assert!(INDEX_HTML.contains("data-tab=\"review\">Review</button>"));
         assert!(INDEX_HTML.contains("data-review-tab=\"evidence\""));
@@ -13518,6 +14541,71 @@ mod tests {
         assert!(!INDEX_HTML.contains("data-inspector-tab=\"changes\""));
         assert!(!INDEX_HTML.contains("data-inspector-tab=\"audit\""));
         assert!(!INDEX_HTML.contains("data-inspector-tab=\"timeline\""));
+    }
+
+    #[test]
+    fn desktop_opens_to_board_not_workbench() {
+        assert!(INDEX_HTML.contains(
+            r#"<body data-density="dense" data-active-tab="project" data-active-group="project" data-active-inspector-tab="pane">"#
+        ));
+        assert!(
+            INDEX_HTML.contains(r#"<button class="tab active" data-tab="project">Board</button>"#)
+        );
+        assert!(INDEX_HTML.contains(r#"<section class="tab-page active" data-page="project">"#));
+        assert!(INDEX_HTML.contains(r#"<button class="tab" data-tab="research">Research</button>"#));
+        assert!(INDEX_HTML.contains(r#"<button class="tab" data-tab="panes">Workbench</button>"#));
+        assert!(INDEX_HTML.contains(r#"<section class="tab-page" data-page="panes">"#));
+        assert!(INDEX_HTML.contains(r#"<button class="tab" data-tab="review">Review</button>"#));
+        assert!(!INDEX_HTML
+            .contains(r#"<button class="tab active" data-tab="panes">Workbench</button>"#));
+        assert!(!INDEX_HTML.contains(r#"<section class="tab-page active" data-page="panes">"#));
+    }
+
+    #[test]
+    fn workbench_controls_are_not_front_door_copy() {
+        assert!(INDEX_HTML.contains("Project Home"));
+        assert!(INDEX_HTML.contains("What do you want to do with this project?"));
+        assert!(INDEX_HTML.contains("Continue work"));
+        assert!(INDEX_HTML.contains("I have no clue where this project is at"));
+        assert!(INDEX_HTML.contains("I have a plan"));
+        assert!(INDEX_HTML.contains("Help me make a plan"));
+    }
+
+    #[test]
+    fn project_home_renders_board_lanes_and_next_action() {
+        assert!(INDEX_HTML.contains("function loadProjectHome"));
+        assert!(INDEX_HTML.contains("function renderProjectHome"));
+        assert!(INDEX_HTML.contains("function renderMissionBoard"));
+        assert!(INDEX_HTML.contains("Inbox / Ideas"));
+        assert!(INDEX_HTML.contains("Parent Review"));
+        assert!(INDEX_HTML.contains("data-board-action"));
+        assert!(INDEX_HTML.contains("if (projectHomeProjection)"));
+    }
+
+    #[test]
+    fn research_room_has_chat_prompt_modes_and_source_checkboxes() {
+        assert!(INDEX_HTML.contains(r#"<section class="tab-page" data-page="research">"#));
+        assert!(INDEX_HTML.contains("What's going on in this project?"));
+        assert!(INDEX_HTML.contains("id=\"researchPrompt\""));
+        assert!(INDEX_HTML.contains("data-research-mode=\"summary\""));
+        assert!(INDEX_HTML.contains("data-research-mode=\"code\""));
+        assert!(INDEX_HTML.contains("data-research-mode=\"design\""));
+        assert!(INDEX_HTML.contains("data-research-mode=\"research\""));
+        assert!(INDEX_HTML.contains("data-research-source=\"px\""));
+        assert!(INDEX_HTML.contains("data-research-source=\"git\""));
+        assert!(INDEX_HTML.contains("data-research-source=\"recorder\""));
+        assert!(INDEX_HTML.contains("data-research-source=\"sessions\""));
+        assert!(INDEX_HTML.contains("data-research-source=\"foxchat\""));
+        assert!(INDEX_HTML.contains("http://localhost:5100/chat?theme=dark"));
+    }
+
+    #[test]
+    fn command_tray_is_workbench_only_by_default() {
+        assert!(INDEX_HTML.contains("body:not([data-active-tab=\"panes\"]) .pane-command-deck"));
+        assert!(INDEX_HTML.contains("body:not([data-active-tab=\"panes\"]) .pane-roster"));
+        assert!(INDEX_HTML.contains("data-open-command-tray"));
+        assert!(INDEX_HTML.contains("setActiveTab('panes');"));
+        assert!(INDEX_HTML.contains("setCommandDeckVisible(true);"));
     }
 
     #[test]
@@ -13560,12 +14648,14 @@ mod tests {
     #[test]
     fn desktop_shell_mission_sidecar_holds_parent_contract_lanes() {
         assert!(INDEX_HTML.contains("<h2>Parent contract lanes</h2>"));
-        assert!(INDEX_HTML.contains("Mission is the contract surface."));
-        assert!(INDEX_HTML.contains("data-room-jump=\"panes\">Workbench</button>"));
+        assert!(INDEX_HTML.contains(
+            "Use Board first, Research when the project is unclear, and Workbench only when live terminal truth matters."
+        ));
+        assert!(INDEX_HTML.contains("data-room-jump=\"panes\">Continue work</button>"));
         assert!(!INDEX_HTML.contains("data-room-jump=\"panes\">Panes</button>"));
         assert!(!INDEX_HTML.contains("data-room-jump=\"panes\">Live Panes</button>"));
         assert!(INDEX_HTML.contains("data-open-command-tray"));
-        assert!(INDEX_HTML.contains("data-room-jump=\"review\">Review</button>"));
+        assert!(INDEX_HTML.contains("data-room-jump=\"review\">Review packets</button>"));
         assert!(INDEX_HTML.contains("data-room-jump=\"evidence\">Evidence</button>"));
         assert!(INDEX_HTML.contains("class=\"room-lane-button\" data-room-jump"));
         assert!(!INDEX_HTML.contains("class=\"review-lane-button\""));
@@ -13632,9 +14722,10 @@ mod tests {
         assert!(INDEX_HTML.contains(
             "sync('detailsQuickToggle', !document.body.classList.contains('hide-inspector'));"
         ));
-        assert!(INDEX_HTML.contains(
-            "sync('commandQuickToggle', document.body.classList.contains('show-command-deck'));"
-        ));
+        assert!(INDEX_HTML
+            .contains("const pressed = document.body.classList.contains('show-command-deck');"));
+        assert!(INDEX_HTML.contains("sync('commandQuickToggle', pressed);"));
+        assert!(INDEX_HTML.contains("button.textContent = pressed ? 'Hide command' : 'Command';"));
         assert!(INDEX_HTML
             .contains("document.getElementById('treeQuickToggle').addEventListener('click'"));
         assert!(INDEX_HTML
@@ -13734,6 +14825,21 @@ mod tests {
         ));
         assert!(!INDEX_HTML.contains("Intervention instruction to selected pane or scope"));
         assert!(!INDEX_HTML.contains("The workbench is showing the selected pane"));
+    }
+
+    #[test]
+    fn desktop_shell_command_tray_has_local_hide_control_and_stateful_toggle_label() {
+        assert!(INDEX_HTML.contains("id=\"deckClose\">Hide tray</button>"));
+        assert!(
+            INDEX_HTML.contains("document.getElementById('deckClose').addEventListener('click'")
+        );
+        assert!(INDEX_HTML.contains("button.textContent = pressed ? 'Hide command' : 'Command';"));
+        assert!(INDEX_HTML.contains(
+            "button.title = pressed ? 'Hide parent command tray' : 'Show parent command tray';"
+        ));
+        assert!(INDEX_HTML
+            .contains("menuButton.textContent = pressed ? 'Hide parent tray' : 'Parent tray';"));
+        assert!(INDEX_HTML.contains("max-height: min(520px, 54vh);"));
     }
 
     #[test]
@@ -14247,7 +15353,8 @@ mod tests {
         assert!(INDEX_HTML.contains("id=\"liveCommandSummary\""));
         assert!(INDEX_HTML.contains("id=\"liveCommandActions\""));
         assert!(INDEX_HTML.contains("function renderLiveCommandStrip"));
-        assert!(INDEX_HTML.contains("Parent command"));
+        assert!(INDEX_HTML.contains("Parent decision"));
+        assert!(INDEX_HTML.contains("function parentDecisionState"));
         assert!(INDEX_HTML.contains("body:not(.pane-wall) .live-command-strip"));
         assert!(INDEX_HTML.contains("body.pane-wall .live-command-strip"));
         assert!(INDEX_HTML.contains("renderLiveCommandStrip({"));
@@ -14258,17 +15365,36 @@ mod tests {
     #[test]
     fn desktop_shell_live_focus_keeps_center_terminal_first() {
         assert!(INDEX_HTML.contains(
-            "body:not(.pane-wall) .tab-page[data-page=\"panes\"].active {\n      grid-template-rows: minmax(0, 1fr);"
+            "body:not(.pane-wall) .tab-page[data-page=\"panes\"].active {\n      grid-template-rows: auto minmax(0, 1fr);"
         ));
         assert!(INDEX_HTML
-            .contains("body:not(.pane-wall) .live-command-strip {\n\t      display: none;"));
+            .contains("body:not(.pane-wall) .live-command-strip {\n\t      display: flex;"));
+        assert!(INDEX_HTML.contains("mission decision rail, not a second dashboard"));
         assert!(INDEX_HTML.contains("id=\"deckSendAll\">Broadcast scope</button>"));
         assert!(INDEX_HTML.contains("id=\"wallHudSendScope\">Broadcast scope</button>"));
         assert!(!INDEX_HTML.contains("id=\"deckSendAll\">Send scope</button>"));
         assert!(!INDEX_HTML.contains("id=\"wallHudSendScope\">Send scope</button>"));
-        assert!(!INDEX_HTML.contains(
-            "body:not(.pane-wall) .tab-page[data-page=\"panes\"].active {\n      grid-template-rows: auto minmax(0, 1fr);"
-        ));
+        assert!(!INDEX_HTML
+            .contains("body:not(.pane-wall) .live-command-strip {\n\t      display: none;"));
+    }
+
+    #[test]
+    fn desktop_shell_pane_wall_hud_is_parent_decision_first() {
+        assert!(INDEX_HTML.contains("<span class=\"wall-hud-kicker\">Parent decision</span>"));
+        assert!(INDEX_HTML.contains("id=\"wallHudReview\">Review decision</button>"));
+        assert!(INDEX_HTML.contains("document.getElementById('wallHudReview').addEventListener"));
+        assert!(INDEX_HTML.contains("setActiveTab('review');"));
+        assert!(INDEX_HTML.contains("const decision = parentDecisionState();"));
+        assert!(INDEX_HTML.contains("title.textContent = decision.nextAction;"));
+        assert!(INDEX_HTML.contains("Watching ${wave.title}"));
+        assert!(!INDEX_HTML.contains("<span class=\"wall-hud-kicker\">Watching pane</span>"));
+    }
+
+    #[test]
+    fn desktop_shell_uses_child_pane_language_for_launch_controls() {
+        assert!(INDEX_HTML.contains("id=\"deckStartChild\">New child pane</button>"));
+        assert!(INDEX_HTML.contains("id=\"wallHudNewChild\">New child</button>"));
+        assert!(!INDEX_HTML.contains("id=\"deckStartChild\">New wave pane</button>"));
     }
 
     #[test]
@@ -14434,7 +15560,9 @@ mod tests {
             .contains("const gateText = dependencyGateLabel(gate).replace(/^gate\\s+/i, '');"));
         assert!(INDEX_HTML.contains("gate ${gateText}"));
         assert!(INDEX_HTML.contains("blast ${wave.blast}"));
-        assert!(INDEX_HTML.contains("context.innerHTML = renderWallContext(wave);"));
+        assert!(INDEX_HTML.contains(
+            "context.innerHTML = `<span class=\"wall-context-pill ${escapeHtml(decision.tone)}\">parent decision</span>${renderWallContext(wave)}`;"
+        ));
         assert!(!INDEX_HTML.contains(
             "body.pane-wall:not(.wall-hud-expanded) .wall-hud-context {\n      display: none;"
         ));
@@ -14500,6 +15628,7 @@ mod tests {
 
     #[test]
     fn desktop_shell_command_wall_compact_bar_is_watch_first() {
+        assert!(INDEX_HTML.contains("id=\"wallHudReview\">Review decision</button>"));
         assert!(INDEX_HTML.contains("id=\"wallHudRead\">Read output</button>"));
         assert!(INDEX_HTML.contains("id=\"wallHudMore\" aria-pressed=\"false\">Intervene</button>"));
         assert!(INDEX_HTML.contains("id=\"wallHudFull\">Expand pane</button>"));
@@ -14513,7 +15642,7 @@ mod tests {
 
     #[test]
     fn desktop_shell_all_panes_separates_watching_from_intervention() {
-        assert!(INDEX_HTML.contains("<span class=\"wall-hud-kicker\">Watching pane</span>"));
+        assert!(INDEX_HTML.contains("<span class=\"wall-hud-kicker\">Parent decision</span>"));
         assert!(INDEX_HTML.contains("Choose a live pane to watch or intervene."));
         assert!(INDEX_HTML
             .contains("placeholder=\"Intervention instruction to watched pane or scope\""));
@@ -14529,14 +15658,15 @@ mod tests {
 
     #[test]
     fn desktop_shell_command_wall_hud_uses_watching_language() {
-        assert!(INDEX_HTML.contains("<span class=\"wall-hud-kicker\">Watching pane</span>"));
+        assert!(INDEX_HTML.contains("<span class=\"wall-hud-kicker\">Parent decision</span>"));
         assert!(INDEX_HTML.contains(
             "<strong class=\"wall-hud-title\" id=\"wallHudTitle\">No pane watched</strong>"
         ));
         assert!(INDEX_HTML.contains("Choose a live pane to watch or intervene."));
-        assert!(INDEX_HTML.contains("title.textContent = `Watching ${wave.title}`;"));
+        assert!(INDEX_HTML.contains("title.textContent = decision.nextAction;"));
+        assert!(INDEX_HTML.contains("Watching ${wave.title}"));
         assert!(INDEX_HTML.contains("parent lane watching ${childWaves().length} child pane"));
-        assert!(INDEX_HTML.contains("intervention lane - ${wave.mode} - ${wave.status}"));
+        assert!(INDEX_HTML.contains("${wave.mode} - ${wave.status}"));
         assert!(!INDEX_HTML.contains("<span class=\"wall-hud-kicker\">Selected pane</span>"));
         assert!(!INDEX_HTML.contains("title.textContent = `${wave.title} (${wave.role})`;"));
     }
@@ -14931,6 +16061,80 @@ mod tests {
         );
 
         fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn desktop_agent_argv_expands_dsp_recipe_before_path_resolution() {
+        let dir = std::env::temp_dir().join(format!(
+            "herdr-desktop-dsp-recipe-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("clock after epoch")
+                .as_nanos()
+        ));
+        fs::create_dir_all(&dir).expect("create temp agent dir");
+        let executable = dir.join("claude");
+        fs::write(&executable, "#!/bin/sh\nexit 0\n").expect("write fake agent");
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut permissions = fs::metadata(&executable)
+                .expect("fake agent metadata")
+                .permissions();
+            permissions.set_mode(0o755);
+            fs::set_permissions(&executable, permissions).expect("chmod fake agent");
+        }
+
+        let resolved = resolve_desktop_agent_argv_from_paths(
+            &["dsp".into()],
+            Some(OsStr::new("")),
+            std::slice::from_ref(&dir),
+        );
+
+        assert_eq!(
+            resolved,
+            vec![
+                executable.to_string_lossy().into_owned(),
+                "--dangerously-skip-permissions".to_string()
+            ]
+        );
+
+        fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn desktop_shell_child_dispatch_records_resolved_agent_command() {
+        assert!(INDEX_HTML.contains("resolvedArgvText"));
+        assert!(INDEX_HTML.contains("agentPayload.result?.resolved_argv"));
+        assert!(INDEX_HTML.contains("resolved: ${resolvedArgvText}"));
+    }
+
+    #[test]
+    fn pane_output_snapshot_detects_agent_receipt_markers() {
+        let snapshot = PaneOutputSnapshot::from_text(
+            "pane-1".into(),
+            "noise\nHERDR_AGENT_READY: joined mission\nHERDR_REPORT_PACKET: 4/10 started\n".into(),
+            12,
+        );
+
+        assert!(snapshot.agent_receipt.ready);
+        assert!(snapshot.agent_receipt.report_packet);
+        assert_eq!(
+            snapshot.agent_receipt.markers,
+            vec![
+                "HERDR_AGENT_READY: joined mission".to_string(),
+                "HERDR_REPORT_PACKET: 4/10 started".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn desktop_shell_child_prompts_request_agent_receipt_markers() {
+        assert!(INDEX_HTML.contains("HERDR_AGENT_READY"));
+        assert!(INDEX_HTML.contains("HERDR_REPORT_PACKET"));
+        assert!(INDEX_HTML.contains("agentReceiptLabel"));
     }
 
     #[test]

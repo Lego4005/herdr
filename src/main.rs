@@ -33,6 +33,7 @@ mod ipc;
 mod kitty_graphics;
 mod layout;
 mod logging;
+mod mission_record;
 mod pane;
 mod persist;
 mod platform;
@@ -325,6 +326,7 @@ fn main() -> io::Result<()> {
         println!("       herdr pane <subcommand> ...");
         println!("       herdr wait <subcommand> ...");
         println!("       herdr session <subcommand> ...");
+        println!("       herdr mission <subcommand> ...");
         println!("       herdr integration <subcommand> ...");
         println!();
         println!("Common commands:");
@@ -367,6 +369,10 @@ fn main() -> io::Result<()> {
             (
                 "herdr session <subcommand>",
                 "Manage named persistent sessions",
+            ),
+            (
+                "herdr mission <subcommand>",
+                "Record mission notes, assignments, packets, and audits",
             ),
             (
                 "herdr integration <subcommand>",
@@ -435,6 +441,7 @@ fn main() -> io::Result<()> {
                 "pane",
                 "wait",
                 "session",
+                "mission",
                 "integration",
             ]
             .contains(&arg.as_str())

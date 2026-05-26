@@ -1,13 +1,13 @@
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Request {
     pub id: String,
     #[serde(flatten)]
     pub method: Method,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "method", content = "params")]
 pub enum Method {
     #[serde(rename = "ping")]
@@ -86,6 +86,16 @@ pub enum Method {
     EventsWait(EventsWaitParams),
     #[serde(rename = "pane.wait_for_output")]
     PaneWaitForOutput(PaneWaitForOutputParams),
+    #[serde(rename = "mission.record")]
+    MissionRecord(MissionRecordParams),
+    #[serde(rename = "mission.event")]
+    MissionEvent(MissionEventParams),
+    #[serde(rename = "mission.packet")]
+    MissionPacket(MissionPacketParams),
+    #[serde(rename = "mission.list_events")]
+    MissionListEvents(MissionListEventsParams),
+    #[serde(rename = "mission.get")]
+    MissionGet(MissionGetParams),
     #[serde(rename = "integration.install")]
     IntegrationInstall(IntegrationInstallParams),
     #[serde(rename = "integration.uninstall")]
@@ -106,6 +116,61 @@ pub struct WorkspaceTarget {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PaneTarget {
     pub pane_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MissionRecordParams {
+    pub project_root: String,
+    pub title: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub markdown_path: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MissionEventParams {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mission_id: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pane_id: Option<String>,
+    pub provider: String,
+    pub kind: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
+    #[serde(default)]
+    pub payload: serde_json::Value,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MissionPacketParams {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mission_id: Option<i64>,
+    pub pane_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub field: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
+    #[serde(default)]
+    pub ready: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audit_score: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audit_verdict: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct MissionListEventsParams {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mission_id: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pane_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<usize>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct MissionGetParams {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mission_id: Option<i64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -504,7 +569,7 @@ pub enum EventKind {
     PaneAgentStatusChanged,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SuccessResponse {
     pub id: String,
     pub result: ResponseResult,
@@ -522,7 +587,7 @@ pub struct ErrorBody {
     pub message: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ResponseResult {
     Pong {
@@ -578,6 +643,21 @@ pub enum ResponseResult {
         revision: u64,
         matched_line: Option<String>,
         read: PaneReadResult,
+    },
+    MissionRecord {
+        mission: crate::mission_record::MissionSnapshot,
+    },
+    MissionEvent {
+        event: crate::mission_record::MissionEvent,
+    },
+    MissionPacket {
+        packet: crate::mission_record::MissionPacket,
+    },
+    MissionEvents {
+        events: Vec<crate::mission_record::MissionEvent>,
+    },
+    MissionView {
+        view: crate::mission_record::MissionRecordView,
     },
     IntegrationInstall {
         target: IntegrationTarget,
@@ -834,6 +914,63 @@ mod tests {
         let json = serde_json::to_string(&request).unwrap();
         let restored: Request = serde_json::from_str(&json).unwrap();
         assert_eq!(restored, request);
+    }
+
+    #[test]
+    fn request_round_trips_for_mission_recorder_methods() {
+        let requests = [
+            Request {
+                id: "mission_record".into(),
+                method: Method::MissionRecord(MissionRecordParams {
+                    project_root: "/tmp/project".into(),
+                    title: "Recorder proof".into(),
+                    markdown_path: None,
+                }),
+            },
+            Request {
+                id: "mission_event".into(),
+                method: Method::MissionEvent(MissionEventParams {
+                    mission_id: Some(7),
+                    pane_id: Some("pane_1".into()),
+                    provider: "claude".into(),
+                    kind: "subagent_start".into(),
+                    text: Some("researcher started".into()),
+                    payload: serde_json::json!({ "task": "inspect logs" }),
+                }),
+            },
+            Request {
+                id: "mission_packet".into(),
+                method: Method::MissionPacket(MissionPacketParams {
+                    mission_id: Some(7),
+                    pane_id: "pane_1".into(),
+                    field: Some("What I found".into()),
+                    text: Some("The child recorded a finding.".into()),
+                    ready: false,
+                    audit_score: None,
+                    audit_verdict: None,
+                }),
+            },
+            Request {
+                id: "mission_list_events".into(),
+                method: Method::MissionListEvents(MissionListEventsParams {
+                    mission_id: Some(7),
+                    pane_id: None,
+                    limit: Some(10),
+                }),
+            },
+            Request {
+                id: "mission_get".into(),
+                method: Method::MissionGet(MissionGetParams {
+                    mission_id: Some(7),
+                }),
+            },
+        ];
+
+        for request in requests {
+            let json = serde_json::to_string(&request).unwrap();
+            let restored: Request = serde_json::from_str(&json).unwrap();
+            assert_eq!(restored, request);
+        }
     }
 
     #[test]

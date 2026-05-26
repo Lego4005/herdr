@@ -42,6 +42,7 @@ pub fn maybe_run(args: &[String]) -> std::io::Result<CommandOutcome> {
         "wait" => run_wait_command(&args[2..])?,
         "integration" => run_integration_command(&args[2..])?,
         "session" => run_session_command(&args[2..])?,
+        "mission" => run_mission_command(&args[2..])?,
         "desktop" => crate::desktop::run_desktop_command(&args[2..])?,
         _ => return Ok(CommandOutcome::NotCli),
     };
@@ -114,6 +115,396 @@ fn run_config_command(args: &[String]) -> std::io::Result<i32> {
             Ok(2)
         }
     }
+}
+
+fn run_mission_command(args: &[String]) -> std::io::Result<i32> {
+    let Some(subcommand) = args.first().map(|arg| arg.as_str()) else {
+        print_mission_help();
+        return Ok(2);
+    };
+
+    match subcommand {
+        "init" => mission_init(&args[1..]),
+        "note" => mission_note(&args[1..]),
+        "assign" => mission_assign(&args[1..]),
+        "report" => mission_report(&args[1..]),
+        "packet" => mission_packet(&args[1..]),
+        "audit" => mission_audit(&args[1..]),
+        "event" => mission_event(&args[1..]),
+        "help" | "--help" | "-h" => {
+            print_mission_help();
+            Ok(0)
+        }
+        _ => {
+            print_mission_help();
+            Ok(2)
+        }
+    }
+}
+
+fn print_mission_help() {
+    eprintln!("usage:");
+    eprintln!("  herdr mission init --project PATH --title TITLE");
+    eprintln!("  herdr mission note --pane PANE --text TEXT");
+    eprintln!("  herdr mission assign --pane PANE --role ROLE --task TEXT");
+    eprintln!("  herdr mission report --pane PANE --field FIELD --text TEXT");
+    eprintln!("  herdr mission packet --pane PANE --ready");
+    eprintln!("  herdr mission audit --pane PANE --score N --verdict pass|needs-fixes|fail");
+    eprintln!("  herdr mission event --provider claude|codex|fdag|generic --kind KIND --json JSON");
+}
+
+fn mission_init(args: &[String]) -> std::io::Result<i32> {
+    let mut project = None;
+    let mut title = None;
+    let mut index = 0;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--project" => {
+                project = Some(required_arg(args, index, "--project")?);
+                index += 2;
+            }
+            "--title" => {
+                title = Some(required_arg(args, index, "--title")?);
+                index += 2;
+            }
+            other => {
+                eprintln!("unknown option: {other}");
+                return Ok(2);
+            }
+        }
+    }
+    let Some(project) = project else {
+        eprintln!("missing --project");
+        return Ok(2);
+    };
+    let Some(title) = title else {
+        eprintln!("missing --title");
+        return Ok(2);
+    };
+    let store = mission_store()?;
+    let mission = store
+        .init_mission(std::path::Path::new(&project), &title)
+        .map_err(std::io::Error::other)?;
+    print_json(&serde_json::json!({ "mission": mission }))
+}
+
+fn mission_note(args: &[String]) -> std::io::Result<i32> {
+    let Some((pane, text)) =
+        parse_pane_text_command(args, "usage: herdr mission note --pane PANE --text TEXT")?
+    else {
+        return Ok(2);
+    };
+    let store = mission_store()?;
+    let event = store
+        .record_event(crate::mission_record::MissionEventInput {
+            mission_id: None,
+            pane_id: Some(pane),
+            provider: "generic".into(),
+            kind: "note".into(),
+            text: Some(text.clone()),
+            payload: serde_json::json!({ "text": text }),
+        })
+        .map_err(std::io::Error::other)?;
+    print_json(&serde_json::json!({ "event": event }))
+}
+
+fn mission_assign(args: &[String]) -> std::io::Result<i32> {
+    let mut pane = None;
+    let mut role = None;
+    let mut task = None;
+    let mut index = 0;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--pane" => {
+                pane = Some(required_arg(args, index, "--pane")?);
+                index += 2;
+            }
+            "--role" => {
+                role = Some(required_arg(args, index, "--role")?);
+                index += 2;
+            }
+            "--task" => {
+                task = Some(required_arg(args, index, "--task")?);
+                index += 2;
+            }
+            other => {
+                eprintln!("unknown option: {other}");
+                return Ok(2);
+            }
+        }
+    }
+    let Some(pane) = pane else {
+        eprintln!("missing --pane");
+        return Ok(2);
+    };
+    let Some(role) = role else {
+        eprintln!("missing --role");
+        return Ok(2);
+    };
+    let Some(task) = task else {
+        eprintln!("missing --task");
+        return Ok(2);
+    };
+    let store = mission_store()?;
+    let event = store
+        .record_event(crate::mission_record::MissionEventInput {
+            mission_id: None,
+            pane_id: Some(pane),
+            provider: "generic".into(),
+            kind: "assignment".into(),
+            text: Some(format!("{role}: {task}")),
+            payload: serde_json::json!({ "role": role, "task": task }),
+        })
+        .map_err(std::io::Error::other)?;
+    print_json(&serde_json::json!({ "event": event }))
+}
+
+fn mission_report(args: &[String]) -> std::io::Result<i32> {
+    let mut pane = None;
+    let mut field = None;
+    let mut text = None;
+    let mut index = 0;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--pane" => {
+                pane = Some(required_arg(args, index, "--pane")?);
+                index += 2;
+            }
+            "--field" => {
+                field = Some(required_arg(args, index, "--field")?);
+                index += 2;
+            }
+            "--text" => {
+                text = Some(required_arg(args, index, "--text")?);
+                index += 2;
+            }
+            other => {
+                eprintln!("unknown option: {other}");
+                return Ok(2);
+            }
+        }
+    }
+    let Some(pane) = pane else {
+        eprintln!("missing --pane");
+        return Ok(2);
+    };
+    let Some(field) = field else {
+        eprintln!("missing --field");
+        return Ok(2);
+    };
+    let Some(text) = text else {
+        eprintln!("missing --text");
+        return Ok(2);
+    };
+    let store = mission_store()?;
+    let mission_id = store
+        .resolve_mission_id(None, Some(&pane))
+        .map_err(std::io::Error::other)?;
+    let packet = store
+        .update_packet_field(mission_id, &pane, &field, &text)
+        .map_err(std::io::Error::other)?;
+    print_json(&serde_json::json!({ "packet": packet }))
+}
+
+fn mission_packet(args: &[String]) -> std::io::Result<i32> {
+    let mut pane = None;
+    let mut ready = false;
+    let mut index = 0;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--pane" => {
+                pane = Some(required_arg(args, index, "--pane")?);
+                index += 2;
+            }
+            "--ready" => {
+                ready = true;
+                index += 1;
+            }
+            other => {
+                eprintln!("unknown option: {other}");
+                return Ok(2);
+            }
+        }
+    }
+    if !ready {
+        eprintln!("usage: herdr mission packet --pane PANE --ready");
+        return Ok(2);
+    }
+    let Some(pane) = pane else {
+        eprintln!("missing --pane");
+        return Ok(2);
+    };
+    let store = mission_store()?;
+    let mission_id = store
+        .resolve_mission_id(None, Some(&pane))
+        .map_err(std::io::Error::other)?;
+    let packet = store
+        .mark_packet_ready(mission_id, &pane)
+        .map_err(std::io::Error::other)?;
+    print_json(&serde_json::json!({ "packet": packet }))
+}
+
+fn mission_audit(args: &[String]) -> std::io::Result<i32> {
+    let mut pane = None;
+    let mut score = None;
+    let mut verdict = None;
+    let mut index = 0;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--pane" => {
+                pane = Some(required_arg(args, index, "--pane")?);
+                index += 2;
+            }
+            "--score" => {
+                let raw = required_arg(args, index, "--score")?;
+                score = Some(raw.parse::<i64>().map_err(|_| {
+                    std::io::Error::other(format!("invalid value for --score: {raw}"))
+                })?);
+                index += 2;
+            }
+            "--verdict" => {
+                verdict = Some(required_arg(args, index, "--verdict")?);
+                index += 2;
+            }
+            other => {
+                eprintln!("unknown option: {other}");
+                return Ok(2);
+            }
+        }
+    }
+    let Some(pane) = pane else {
+        eprintln!("missing --pane");
+        return Ok(2);
+    };
+    let Some(score) = score else {
+        eprintln!("missing --score");
+        return Ok(2);
+    };
+    let Some(verdict) = verdict else {
+        eprintln!("missing --verdict");
+        return Ok(2);
+    };
+    if !matches!(verdict.as_str(), "pass" | "needs-fixes" | "fail") {
+        eprintln!("invalid --verdict (expected pass, needs-fixes, or fail)");
+        return Ok(2);
+    }
+    let store = mission_store()?;
+    let mission_id = store
+        .resolve_mission_id(None, Some(&pane))
+        .map_err(std::io::Error::other)?;
+    let packet = store
+        .record_audit(mission_id, &pane, score, &verdict)
+        .map_err(std::io::Error::other)?;
+    print_json(&serde_json::json!({ "packet": packet }))
+}
+
+fn mission_event(args: &[String]) -> std::io::Result<i32> {
+    let mut provider = None;
+    let mut kind = None;
+    let mut raw_json = None;
+    let mut pane = None;
+    let mut index = 0;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--provider" => {
+                provider = Some(required_arg(args, index, "--provider")?);
+                index += 2;
+            }
+            "--kind" => {
+                kind = Some(required_arg(args, index, "--kind")?);
+                index += 2;
+            }
+            "--json" => {
+                raw_json = Some(required_arg(args, index, "--json")?);
+                index += 2;
+            }
+            "--pane" => {
+                pane = Some(required_arg(args, index, "--pane")?);
+                index += 2;
+            }
+            other => {
+                eprintln!("unknown option: {other}");
+                return Ok(2);
+            }
+        }
+    }
+    let Some(provider) = provider else {
+        eprintln!("missing --provider");
+        return Ok(2);
+    };
+    let Some(kind) = kind else {
+        eprintln!("missing --kind");
+        return Ok(2);
+    };
+    let payload = match raw_json {
+        Some(raw) => {
+            serde_json::from_str::<serde_json::Value>(&raw).map_err(std::io::Error::other)?
+        }
+        None => serde_json::Value::Null,
+    };
+    let adapter = crate::mission_record::adapter_event_from_input(&provider, &kind, payload)
+        .map_err(std::io::Error::other)?;
+    let store = mission_store()?;
+    let event = store
+        .record_event(crate::mission_record::MissionEventInput {
+            mission_id: None,
+            pane_id: pane,
+            provider: adapter.provider,
+            kind: adapter.kind,
+            text: adapter.text,
+            payload: adapter.payload,
+        })
+        .map_err(std::io::Error::other)?;
+    print_json(&serde_json::json!({ "event": event }))
+}
+
+fn parse_pane_text_command(
+    args: &[String],
+    usage: &str,
+) -> std::io::Result<Option<(String, String)>> {
+    let mut pane = None;
+    let mut text = None;
+    let mut index = 0;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--pane" => {
+                pane = Some(required_arg(args, index, "--pane")?);
+                index += 2;
+            }
+            "--text" => {
+                text = Some(required_arg(args, index, "--text")?);
+                index += 2;
+            }
+            other => {
+                eprintln!("unknown option: {other}");
+                eprintln!("{usage}");
+                return Ok(None);
+            }
+        }
+    }
+    match (pane, text) {
+        (Some(pane), Some(text)) => Ok(Some((pane, text))),
+        _ => {
+            eprintln!("{usage}");
+            Ok(None)
+        }
+    }
+}
+
+fn mission_store() -> std::io::Result<crate::mission_record::MissionStore> {
+    crate::mission_record::MissionStore::default_store().map_err(std::io::Error::other)
+}
+
+fn required_arg(args: &[String], index: usize, flag: &str) -> std::io::Result<String> {
+    args.get(index + 1)
+        .cloned()
+        .ok_or_else(|| std::io::Error::other(format!("missing value for {flag}")))
+}
+
+fn print_json(value: &serde_json::Value) -> std::io::Result<i32> {
+    let text = serde_json::to_string_pretty(value).map_err(std::io::Error::other)?;
+    println!("{text}");
+    Ok(0)
 }
 
 fn config_reset_keys(args: &[String]) -> std::io::Result<i32> {

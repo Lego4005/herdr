@@ -46,8 +46,11 @@ try {
   const loadEvent = page.waitForEvent('Page.loadEventFired', 10000);
   await page.send('Page.navigate', { url });
   await loadEvent;
+  await waitForSelector(page, '[data-page="project"].active');
   await waitForSelector(page, '#missionChildren');
   await waitForSelector(page, '#waveGrid');
+  await waitForSelector(page, '#projectBoard');
+  await waitForSelector(page, '#researchPrompt');
   await waitForSelector(page, '#deckStartChildRight');
   await waitForFunction(
     page,
@@ -63,10 +66,24 @@ try {
     const reviewTabs = Array.from(document.querySelectorAll('[data-review-tab]')).map(button => button.textContent.trim());
     const treeText = document.querySelector('#missionChildren')?.textContent || '';
     const gridText = document.querySelector('#waveGrid')?.textContent || '';
+    const boardText = document.querySelector('#projectBoard')?.textContent || '';
     const html = document.documentElement.innerHTML;
     const treeToggle = document.querySelector('#treeQuickToggle');
     const detailsToggle = document.querySelector('#detailsQuickToggle');
     const commandToggle = document.querySelector('#commandQuickToggle');
+    const commandDeck = document.querySelector('.pane-command-deck');
+    const commandDeckStyleOnBoard = commandDeck ? window.getComputedStyle(commandDeck) : null;
+    const commandTrayHiddenOnBoard = Boolean(commandDeckStyleOnBoard && commandDeckStyleOnBoard.display === 'none');
+    const projectActiveOnLoad = document.querySelector('[data-page="project"]')?.classList.contains('active') || false;
+
+    document.querySelector('[data-tab="research"]')?.click();
+    const researchActive = document.querySelector('[data-page="research"]')?.classList.contains('active') || false;
+    const researchPrompt = Boolean(document.querySelector('#researchPrompt'));
+    const researchSources = Array.from(document.querySelectorAll('[data-research-source]')).map(input => input.dataset.researchSource);
+    const researchModes = Array.from(document.querySelectorAll('[data-research-mode]')).map(button => button.dataset.researchMode);
+
+    document.querySelector('[data-tab="panes"]')?.click();
+    const workbenchActive = document.querySelector('[data-page="panes"]')?.classList.contains('active') || false;
 
     treeToggle?.click();
     const treeHidden = document.body.classList.contains('hide-tree');
@@ -91,6 +108,14 @@ try {
       reviewTabs,
       treeText,
       gridText,
+      boardText,
+      projectActiveOnLoad,
+      commandTrayHiddenOnBoard,
+      researchActive,
+      researchPrompt,
+      researchSources,
+      researchModes,
+      workbenchActive,
       treeHidden,
       treeVisibleAgain,
       detailsVisible,
@@ -108,9 +133,23 @@ try {
 
   const failures = [];
   if (result.title !== 'Herdr Workroom Preview') failures.push(`unexpected title: ${result.title}`);
-  if (result.tabs.join('|') !== 'Mission|Workbench|Review') {
+  if (result.tabs.join('|') !== 'Board|Research|Workbench|Review') {
     failures.push(`unexpected tabs: ${result.tabs.join(', ')}`);
   }
+  if (!result.projectActiveOnLoad) failures.push('desktop did not open to Board');
+  if (!result.commandTrayHiddenOnBoard) failures.push('command tray visible on Board');
+  if (!result.boardText.includes('No child sessions yet') && !result.boardText.includes('Parent Review')) {
+    failures.push('board missing project-home lane content');
+  }
+  if (!result.researchActive) failures.push('Research tab did not activate');
+  if (!result.researchPrompt) failures.push('Research prompt missing');
+  for (const mode of ['summary', 'code', 'design', 'research']) {
+    if (!result.researchModes.includes(mode)) failures.push(`missing research mode: ${mode}`);
+  }
+  for (const source of ['px', 'git', 'recorder', 'sessions', 'foxchat']) {
+    if (!result.researchSources.includes(source)) failures.push(`missing research source: ${source}`);
+  }
+  if (!result.workbenchActive) failures.push('Workbench tab did not activate');
   for (const tab of ['Overview', 'Evidence', 'Changes', 'Audit', 'Timeline']) {
     if (!result.reviewTabs.includes(tab)) failures.push(`missing review sidecar tab: ${tab}`);
   }

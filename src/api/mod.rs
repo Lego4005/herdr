@@ -395,7 +395,134 @@ fn handle_request(request: Request, api_tx: &ApiRequestSender) -> String {
             r#"{"id":"","error":{"code":"internal_error","message":"failed to encode response"}}"#
                 .to_string()
         }),
+        Method::MissionRecord(params) => mission_record_response(request.id, params),
+        Method::MissionEvent(params) => mission_event_response(request.id, params),
+        Method::MissionPacket(params) => mission_packet_response(request.id, params),
+        Method::MissionListEvents(params) => mission_list_events_response(request.id, params),
+        Method::MissionGet(params) => mission_get_response(request.id, params),
         _ => dispatch_to_app(request, api_tx),
+    }
+}
+
+fn mission_error_response(id: String, err: crate::mission_record::MissionRecordError) -> String {
+    serde_json::to_string(&ErrorResponse {
+        id,
+        error: ErrorBody {
+            code: "mission_record_failed".into(),
+            message: err.to_string(),
+        },
+    })
+    .unwrap_or_else(|_| {
+        r#"{"id":"","error":{"code":"internal_error","message":"failed to encode response"}}"#
+            .to_string()
+    })
+}
+
+fn mission_success_response(id: String, result: ResponseResult) -> String {
+    serde_json::to_string(&SuccessResponse { id, result }).unwrap_or_else(|_| {
+        r#"{"id":"","error":{"code":"internal_error","message":"failed to encode response"}}"#
+            .to_string()
+    })
+}
+
+fn mission_record_response(id: String, params: crate::api::schema::MissionRecordParams) -> String {
+    let store = match crate::mission_record::MissionStore::default_store() {
+        Ok(store) => store,
+        Err(err) => return mission_error_response(id, err),
+    };
+    let project = std::path::PathBuf::from(params.project_root);
+    let mission = match params.markdown_path {
+        Some(path) => {
+            store.init_mission_with_path(&project, &params.title, std::path::Path::new(&path))
+        }
+        None => store.init_mission(&project, &params.title),
+    };
+    match mission {
+        Ok(mission) => mission_success_response(id, ResponseResult::MissionRecord { mission }),
+        Err(err) => mission_error_response(id, err),
+    }
+}
+
+fn mission_event_response(id: String, params: crate::api::schema::MissionEventParams) -> String {
+    let store = match crate::mission_record::MissionStore::default_store() {
+        Ok(store) => store,
+        Err(err) => return mission_error_response(id, err),
+    };
+    let adapter = match crate::mission_record::adapter_event_from_input(
+        &params.provider,
+        &params.kind,
+        params.payload,
+    ) {
+        Ok(adapter) => adapter,
+        Err(err) => return mission_error_response(id, err),
+    };
+    match store.record_event(crate::mission_record::MissionEventInput {
+        mission_id: params.mission_id,
+        pane_id: params.pane_id,
+        provider: adapter.provider,
+        kind: adapter.kind,
+        text: params.text.or(adapter.text),
+        payload: adapter.payload,
+    }) {
+        Ok(event) => mission_success_response(id, ResponseResult::MissionEvent { event }),
+        Err(err) => mission_error_response(id, err),
+    }
+}
+
+fn mission_packet_response(id: String, params: crate::api::schema::MissionPacketParams) -> String {
+    let store = match crate::mission_record::MissionStore::default_store() {
+        Ok(store) => store,
+        Err(err) => return mission_error_response(id, err),
+    };
+    let mission_id = match store.resolve_mission_id(params.mission_id, Some(&params.pane_id)) {
+        Ok(mission_id) => mission_id,
+        Err(err) => return mission_error_response(id, err),
+    };
+    let result = if let (Some(score), Some(verdict)) =
+        (params.audit_score, params.audit_verdict.as_deref())
+    {
+        store.record_audit(mission_id, &params.pane_id, score, verdict)
+    } else if params.ready {
+        store.mark_packet_ready(mission_id, &params.pane_id)
+    } else if let (Some(field), Some(text)) = (params.field.as_deref(), params.text.as_deref()) {
+        store.update_packet_field(mission_id, &params.pane_id, field, text)
+    } else {
+        Err(crate::mission_record::MissionRecordError::InvalidInput(
+            "mission.packet needs field/text, ready=true, or audit score/verdict".into(),
+        ))
+    };
+    match result {
+        Ok(packet) => mission_success_response(id, ResponseResult::MissionPacket { packet }),
+        Err(err) => mission_error_response(id, err),
+    }
+}
+
+fn mission_list_events_response(
+    id: String,
+    params: crate::api::schema::MissionListEventsParams,
+) -> String {
+    let store = match crate::mission_record::MissionStore::default_store() {
+        Ok(store) => store,
+        Err(err) => return mission_error_response(id, err),
+    };
+    match store.list_events(crate::mission_record::MissionEventQuery {
+        mission_id: params.mission_id,
+        pane_id: params.pane_id,
+        limit: params.limit,
+    }) {
+        Ok(events) => mission_success_response(id, ResponseResult::MissionEvents { events }),
+        Err(err) => mission_error_response(id, err),
+    }
+}
+
+fn mission_get_response(id: String, params: crate::api::schema::MissionGetParams) -> String {
+    let store = match crate::mission_record::MissionStore::default_store() {
+        Ok(store) => store,
+        Err(err) => return mission_error_response(id, err),
+    };
+    match store.get_mission(params.mission_id) {
+        Ok(view) => mission_success_response(id, ResponseResult::MissionView { view }),
+        Err(err) => mission_error_response(id, err),
     }
 }
 
@@ -439,6 +566,11 @@ fn api_method_name(method: &Method) -> &'static str {
         Method::EventsSubscribe(_) => "events.subscribe",
         Method::EventsWait(_) => "events.wait",
         Method::PaneWaitForOutput(_) => "pane.wait_for_output",
+        Method::MissionRecord(_) => "mission.record",
+        Method::MissionEvent(_) => "mission.event",
+        Method::MissionPacket(_) => "mission.packet",
+        Method::MissionListEvents(_) => "mission.list_events",
+        Method::MissionGet(_) => "mission.get",
         Method::IntegrationInstall(_) => "integration.install",
         Method::IntegrationUninstall(_) => "integration.uninstall",
     }
@@ -1264,6 +1396,128 @@ mod tests {
         let parsed: SuccessResponse = serde_json::from_str(&response).unwrap();
         assert_eq!(parsed.id, "req_1");
         assert!(matches!(parsed.result, ResponseResult::Pong { .. }));
+    }
+
+    #[test]
+    fn mission_recorder_requests_use_sqlite_without_app_channel() {
+        let _guard = env_lock().lock().unwrap();
+        let old_config_home = std::env::var_os("XDG_CONFIG_HOME");
+        let old_session = std::env::var_os(crate::session::SESSION_ENV_VAR);
+        let config_home = unique_test_path("mission-api-config-home");
+        let project_root = unique_test_path("mission-api-project");
+        fs::create_dir_all(&project_root).unwrap();
+        std::env::set_var("XDG_CONFIG_HOME", &config_home);
+        std::env::remove_var(crate::session::SESSION_ENV_VAR);
+        crate::session::clear_explicit_session_for_test();
+
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let response = handle_request(
+            Request {
+                id: "mission_record".into(),
+                method: Method::MissionRecord(crate::api::schema::MissionRecordParams {
+                    project_root: project_root.display().to_string(),
+                    title: "API recorder proof".into(),
+                    markdown_path: None,
+                }),
+            },
+            &tx,
+        );
+        let parsed: SuccessResponse = serde_json::from_str(&response).unwrap();
+        let mission = match parsed.result {
+            ResponseResult::MissionRecord { mission } => mission,
+            other => panic!("unexpected response: {other:?}"),
+        };
+        assert!(std::path::Path::new(&mission.markdown_path).exists());
+        assert!(config_home
+            .join(crate::config::app_dir_name())
+            .join("mission-records.sqlite3")
+            .exists());
+
+        let response = handle_request(
+            Request {
+                id: "mission_packet".into(),
+                method: Method::MissionPacket(crate::api::schema::MissionPacketParams {
+                    mission_id: None,
+                    pane_id: "pane_api".into(),
+                    field: Some("What I found".into()),
+                    text: Some("API packet data reached the recorder.".into()),
+                    ready: false,
+                    audit_score: None,
+                    audit_verdict: None,
+                }),
+            },
+            &tx,
+        );
+        let parsed: SuccessResponse = serde_json::from_str(&response).unwrap();
+        let packet = match parsed.result {
+            ResponseResult::MissionPacket { packet } => packet,
+            other => panic!("unexpected response: {other:?}"),
+        };
+        assert_eq!(
+            packet
+                .fields
+                .get("What I found")
+                .and_then(|value| value.as_str()),
+            Some("API packet data reached the recorder.")
+        );
+
+        let response = handle_request(
+            Request {
+                id: "mission_event".into(),
+                method: Method::MissionEvent(crate::api::schema::MissionEventParams {
+                    mission_id: Some(mission.id),
+                    pane_id: Some("pane_api".into()),
+                    provider: "claude".into(),
+                    kind: "subagent_report".into(),
+                    text: None,
+                    payload: serde_json::json!({
+                        "agent_id": "auditor",
+                        "summary": "adapter normalized"
+                    }),
+                }),
+            },
+            &tx,
+        );
+        let parsed: SuccessResponse = serde_json::from_str(&response).unwrap();
+        match parsed.result {
+            ResponseResult::MissionEvent { event } => {
+                assert_eq!(event.provider, "claude");
+                assert_eq!(event.kind, "subagent_report");
+                assert_eq!(event.text.as_deref(), Some("adapter normalized"));
+            }
+            other => panic!("unexpected response: {other:?}"),
+        }
+
+        let response = handle_request(
+            Request {
+                id: "mission_events".into(),
+                method: Method::MissionListEvents(crate::api::schema::MissionListEventsParams {
+                    mission_id: Some(mission.id),
+                    pane_id: Some("pane_api".into()),
+                    limit: Some(5),
+                }),
+            },
+            &tx,
+        );
+        let parsed: SuccessResponse = serde_json::from_str(&response).unwrap();
+        match parsed.result {
+            ResponseResult::MissionEvents { events } => {
+                assert!(events.iter().any(|event| event.kind == "report_field"));
+            }
+            other => panic!("unexpected response: {other:?}"),
+        }
+
+        match old_config_home {
+            Some(value) => std::env::set_var("XDG_CONFIG_HOME", value),
+            None => std::env::remove_var("XDG_CONFIG_HOME"),
+        }
+        match old_session {
+            Some(value) => std::env::set_var(crate::session::SESSION_ENV_VAR, value),
+            None => std::env::remove_var(crate::session::SESSION_ENV_VAR),
+        }
+        crate::session::clear_explicit_session_for_test();
+        let _ = fs::remove_dir_all(config_home);
+        let _ = fs::remove_dir_all(project_root);
     }
 
     #[test]
